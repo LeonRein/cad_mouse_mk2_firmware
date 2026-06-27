@@ -12,7 +12,6 @@ bench = false
 
 [dependencies]
 defmt = "1.0"
-defmt-rtt = "1.1"
 panic-probe = { version = "1.0", features = ["print-defmt"] }
 
 embedded-hal = "1.0.0"
@@ -28,6 +27,9 @@ embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"]
 
 cortex-m = { version = "0.7.7" }
 embassy-rp = { version = "0.9", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xa"] }
+embassy-usb = "0.5.1"
+static_cell = "2.1.1"
+defmt-embassy-usbserial = "0.2.1"
 [profile.release]
 debug = 2
 lto = true
