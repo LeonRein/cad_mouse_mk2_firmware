@@ -122,7 +122,7 @@ async fn defmt_logger_task(sender: Sender<'static, MyUsbDriver>) {
 async fn hartbeat_task() {
     loop {
         info!("Heartbeat");
-        embassy_time::Timer::after_millis(1000).await;
+        embassy_time::Timer::after_millis(100).await;
     }
 }
 
