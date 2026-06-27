@@ -1,7 +1,8 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
-runner = "picotool load -x -f -t elf"
+runner = "./flash.sh"
 [build]
 target = "thumbv8m.main-none-eabihf"
 
 [env]
 DEFMT_LOG = "info"
+EMBASSY_USB_MAX_INTERFACE_COUNT = "5"
