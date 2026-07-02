@@ -13,6 +13,7 @@ use embassy_time::{Duration, Ticker, with_timeout};
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State, Sender};
 use static_cell::StaticCell;
+use tli493d::Error as TliError;
 use defmt_embassy_usbserial as _;
 use {panic_probe as _};
 
@@ -93,7 +94,7 @@ async fn main(spawner: Spawner) {
     unwrap!(spawner.spawn(defmt_logger_task(defmt_sender)));
 
     // ── Wait for USB enumeration ──
-    embassy_time::Timer::after_millis(5000).await;
+    embassy_time::Timer::after_millis(600).await;
     info!("Hello — defmt online");
 
     // ── Sensor init with 3 s timeout ──
@@ -148,7 +149,10 @@ async fn main(spawner: Spawner) {
                     let raw = match s.read_raw().await {
                         Ok(r) => r,
                         Err(e) => {
-                            warn!("read error: {}", defmt::Debug2Format(&e));
+                            match e {
+                                TliError::AdcLockup | TliError::DataNotReady => {}
+                                _ => warn!("read error: {}", defmt::Debug2Format(&e)),
+                            }
                             poll.next().await;
                             continue;
                         }

@@ -46,19 +46,19 @@ impl ResetHandler {
         // the USB device runs.
         static HANDLER: static_cell::StaticCell<ResetHandler> = static_cell::StaticCell::new();
 
-        // Create a vendor-specific function with our reset interface
-        let mut function = builder.function(0xFF, RESET_INTERFACE_SUBCLASS, RESET_INTERFACE_PROTOCOL);
-        let mut iface_builder = function.interface();
-        let iface_number = iface_builder.interface_number();
-        let _alt = iface_builder.alt_setting(
-            0xFF, // class: vendor-specific
-            RESET_INTERFACE_SUBCLASS,
-            RESET_INTERFACE_PROTOCOL,
-            None, // no string descriptor
-        );
-        drop(_alt);
-        drop(iface_builder);
-        drop(function);
+        // Create a vendor-specific function with our reset interface.
+        let iface_number = {
+            let mut function = builder.function(0xFF, RESET_INTERFACE_SUBCLASS, RESET_INTERFACE_PROTOCOL);
+            let mut iface_builder = function.interface();
+            let iface_number = iface_builder.interface_number();
+            let _ = iface_builder.alt_setting(
+                0xFF, // class: vendor-specific
+                RESET_INTERFACE_SUBCLASS,
+                RESET_INTERFACE_PROTOCOL,
+                None, // no string descriptor
+            );
+            iface_number
+        };
 
         // Initialize the handler with the correct interface number
         let handler = HANDLER.init(ResetHandler::new(iface_number));

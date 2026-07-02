@@ -76,6 +76,7 @@ impl<T: I2cInstance + 'static> Sensors<T> {
         // A2B6 supports Full and Short (x2). EXTRA_SHORT is not available.
         mag1.set_sensitivity(A2B6Sensitivity::Short).await?;
         mag1.set_update_rate(UpdateRate::Fast).await?;
+        embassy_time::Timer::after_millis(10).await;
         info!("MAG1: ready at A2");
 
         // ── MAG2 (top-left): start at A0, then move to A1 ──
@@ -92,6 +93,7 @@ impl<T: I2cInstance + 'static> Sensors<T> {
         mag2.set_address_slot(AddressSlot::A1).await?;
         mag2.set_sensitivity(A2B6Sensitivity::Short).await?;
         mag2.set_update_rate(UpdateRate::Fast).await?;
+        embassy_time::Timer::after_millis(10).await;
         info!("MAG2: ready at A1");
 
         // ── MAG3 (top-right): start and remain at A0 ──
@@ -107,6 +109,7 @@ impl<T: I2cInstance + 'static> Sensors<T> {
         .await?;
         mag3.set_sensitivity(A2B6Sensitivity::Short).await?;
         mag3.set_update_rate(UpdateRate::Fast).await?;
+        embassy_time::Timer::after_millis(10).await;
         info!("MAG3: ready");
 
         info!("Sensors ready");
@@ -155,6 +158,6 @@ pub fn format_csv(raw: &[i16; 9], buf: &mut [u8]) -> usize {
         }
         let _ = write!(w, "{}", v);
     }
-    let _ = write!(w, "\n");
+    let _ = writeln!(w);
     w.pos
 }
