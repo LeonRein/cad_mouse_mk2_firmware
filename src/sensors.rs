@@ -61,53 +61,12 @@ impl<T: I2cInstance + 'static> Sensors<T> {
 
         let mut delay = Delay;
 
-        // ── MAG1 (bottom): start at A0, then move to A2 ──
-        info!("MAG1: power on");
-        mag1_pwr.set_high();
-        embassy_time::Timer::after_millis(5).await;
-        let mut mag1 = tli493d::Tli493d::new(
-            I2cDevice::new(bus),
-            &mut delay,
-            AddressSlot::A0,
-            PowerMode::LowPower,
-        )
-        .await?;
-        mag1.set_address_slot(AddressSlot::A2).await?;
-        // A2B6 supports Full and Short (x2). EXTRA_SHORT is not available.
-        mag1.set_sensitivity(A2B6Sensitivity::Short).await?;
-        mag1.set_update_rate(UpdateRate::Fast).await?;
-        info!("MAG1: ready at A2");
-
-        // ── MAG2 (top-left): start at A0, then move to A1 ──
-        info!("MAG2: power on");
-        mag2_pwr.set_high();
-        embassy_time::Timer::after_millis(5).await;
-        let mut mag2 = tli493d::Tli493d::new(
-            I2cDevice::new(bus),
-            &mut delay,
-            AddressSlot::A0,
-            PowerMode::LowPower,
-        )
-        .await?;
-        mag2.set_address_slot(AddressSlot::A1).await?;
-        mag2.set_sensitivity(A2B6Sensitivity::Short).await?;
-        mag2.set_update_rate(UpdateRate::Fast).await?;
-        info!("MAG2: ready at A1");
-
-        // ── MAG3 (top-right): start and remain at A0 ──
-        info!("MAG3: power on");
-        mag3_pwr.set_high();
-        embassy_time::Timer::after_millis(5).await;
-        let mut mag3 = tli493d::Tli493d::new(
-            I2cDevice::new(bus),
-            &mut delay,
-            AddressSlot::A0,
-            PowerMode::LowPower,
-        )
-        .await?;
-        mag3.set_sensitivity(A2B6Sensitivity::Short).await?;
-        mag3.set_update_rate(UpdateRate::Fast).await?;
-        info!("MAG3: ready");
+        // Bring each sensor up one at a time: each powers on at the default
+        // address A0, then (except MAG3) is moved to a distinct slot before the
+        // next one is powered on, so they don't collide on the shared bus.
+        let mag1 = bring_up(bus, &mut delay, &mut mag1_pwr, Some(AddressSlot::A2), "MAG1").await?;
+        let mag2 = bring_up(bus, &mut delay, &mut mag2_pwr, Some(AddressSlot::A1), "MAG2").await?;
+        let mag3 = bring_up(bus, &mut delay, &mut mag3_pwr, None, "MAG3").await?;
 
         info!("Sensors ready");
         Ok(Self { mag1, mag2, mag3 })
@@ -122,6 +81,42 @@ impl<T: I2cInstance + 'static> Sensors<T> {
         let r3 = self.mag3.read_raw().await?;
         Ok([r1.x, r1.y, r1.z, r2.x, r2.y, r2.z, r3.x, r3.y, r3.z])
     }
+}
+
+/// Power on a single sensor and configure it.
+///
+/// The sensor powers up at the default address A0; if `target` is `Some`, it is
+/// moved to that slot. All sensors are set to short-range sensitivity (2x) and
+/// the fast low-power update rate. `label` is used only for log messages.
+async fn bring_up<T: I2cInstance + 'static>(
+    bus: &'static SharedBus<T>,
+    delay: &mut Delay,
+    pwr: &mut Output<'static>,
+    target: Option<AddressSlot>,
+    label: &str,
+) -> Result<Tli493dA2b6<SensorI2c<T>>, SensorError> {
+    info!("{}: power on", label);
+    pwr.set_high();
+    embassy_time::Timer::after_millis(5).await;
+
+    let mut sensor = tli493d::Tli493d::new(
+        I2cDevice::new(bus),
+        delay,
+        AddressSlot::A0,
+        PowerMode::LowPower,
+    )
+    .await?;
+
+    if let Some(slot) = target {
+        sensor.set_address_slot(slot).await?;
+    }
+    // A2B6 supports Full and Short (2x); EXTRA_SHORT is not available.
+    sensor.set_sensitivity(A2B6Sensitivity::Short).await?;
+    sensor.set_update_rate(UpdateRate::Fast).await?;
+    embassy_time::Timer::after_millis(10).await;
+
+    info!("{}: ready", label);
+    Ok(sensor)
 }
 
 /// Format 9 raw sensor values as a CSV line into `buf`.
@@ -155,6 +150,6 @@ pub fn format_csv(raw: &[i16; 9], buf: &mut [u8]) -> usize {
         }
         let _ = write!(w, "{}", v);
     }
-    let _ = write!(w, "\n");
+    let _ = writeln!(w);
     w.pos
 }

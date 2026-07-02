@@ -13,6 +13,7 @@ use embassy_time::{Duration, Ticker, with_timeout};
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State, Sender};
 use static_cell::StaticCell;
+use tli493d::Error as TliError;
 use defmt_embassy_usbserial as _;
 use {panic_probe as _};
 
@@ -35,7 +36,7 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
     // Hold LED pins low so they don't float and light up unexpectedly.
-    // RP2040 mapping: PIN_LED_DATA=D3=GPIO29, PIN_LED_LS=D1=GPIO27
+    // XIAO RP2350: PIN_LED_DATA = D3 = GPIO29, PIN_LED_LS = D1 = GPIO27.
     let _led_data = embassy_rp::gpio::Output::new(p.PIN_29, embassy_rp::gpio::Level::Low);
     let _led_ls = embassy_rp::gpio::Output::new(p.PIN_27, embassy_rp::gpio::Level::Low);
 
@@ -93,7 +94,7 @@ async fn main(spawner: Spawner) {
     unwrap!(spawner.spawn(defmt_logger_task(defmt_sender)));
 
     // ── Wait for USB enumeration ──
-    embassy_time::Timer::after_millis(5000).await;
+    embassy_time::Timer::after_millis(1500).await;
     info!("Hello — defmt online");
 
     // ── Sensor init with 3 s timeout ──
@@ -105,9 +106,11 @@ async fn main(spawner: Spawner) {
         c.frequency = 400_000;
         c
     };
+    // XIAO RP2350: I2C1 on D5 = GPIO7 (SCL) and D4 = GPIO6 (SDA).
+    // new_async takes (peripheral, scl, sda, ...).
     let i2c = I2c::new_async(p.I2C1, p.PIN_7, p.PIN_6, I2cIrqs, i2c_cfg);
 
-    // GPIO power pins: D10=GPIO3 (MAG1), D9=GPIO4 (MAG2), D8=GPIO2 (MAG3)
+    // Per-sensor supply switches: D10 = GPIO3 (MAG1), D9 = GPIO4 (MAG2), D8 = GPIO2 (MAG3).
     let mag1_pwr = Output::new(p.PIN_3, Level::Low);
     let mag2_pwr = Output::new(p.PIN_4, Level::Low);
     let mag3_pwr = Output::new(p.PIN_2, Level::Low);
@@ -148,7 +151,10 @@ async fn main(spawner: Spawner) {
                     let raw = match s.read_raw().await {
                         Ok(r) => r,
                         Err(e) => {
-                            warn!("read error: {}", defmt::Debug2Format(&e));
+                            match e {
+                                TliError::AdcLockup | TliError::DataNotReady => {}
+                                _ => warn!("read error: {}", defmt::Debug2Format(&e)),
+                            }
                             poll.next().await;
                             continue;
                         }
@@ -158,6 +164,7 @@ async fn main(spawner: Spawner) {
                     if data_class.write_packet(&buf[..n]).await.is_err() {
                         break;
                     }
+                    info!("Sent data");
                     poll.next().await;
                 }
             }
