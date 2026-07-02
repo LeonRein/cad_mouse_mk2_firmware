@@ -9,7 +9,7 @@ use embassy_rp::i2c::{Config as I2cConfig, I2c, InterruptHandler};
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, with_timeout};
+use embassy_time::{Duration, Ticker, with_timeout};
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State, Sender};
 use static_cell::StaticCell;
@@ -143,11 +143,13 @@ async fn main(spawner: Spawner) {
 
         match sensors {
             Some(ref mut s) => {
+                let mut poll = Ticker::every(Duration::from_millis(1));
                 loop {
                     let raw = match s.read_raw().await {
                         Ok(r) => r,
                         Err(e) => {
                             warn!("read error: {}", defmt::Debug2Format(&e));
+                            poll.next().await;
                             continue;
                         }
                     };
@@ -156,6 +158,7 @@ async fn main(spawner: Spawner) {
                     if data_class.write_packet(&buf[..n]).await.is_err() {
                         break;
                     }
+                    poll.next().await;
                 }
             }
             None => {

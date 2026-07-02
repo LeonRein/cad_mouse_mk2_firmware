@@ -8,7 +8,7 @@ use embassy_rp::i2c::{Async, Error as RpI2cError, I2c, Instance as I2cInstance};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Delay;
-use tli493d::{AddressSlot, PowerMode, A2B6Sensitivity, Tli493dA2b6};
+use tli493d::{AddressSlot, A2B6Sensitivity, PowerMode, Tli493dA2b6, UpdateRate};
 
 /// I2C bus shared across the three sensors.
 pub type SharedBus<T> = Mutex<NoopRawMutex, I2c<'static, T, Async>>;
@@ -32,8 +32,7 @@ impl<T: I2cInstance + 'static> Sensors<T> {
     /// `bus` must be a `&'static` reference to a shared I2C mutex (e.g. from
     /// `StaticCell`). The caller is responsible for creating and storing it.
     ///
-    /// Powers sensors up one by one, running the reset sequence and
-    /// reassigning I2C addresses:
+    /// Powers sensors up one by one and reassigns I2C addresses:
     ///
     /// | Sensor | Power pin | Final address |
     /// |--------|-----------|----------------|
@@ -41,80 +40,77 @@ impl<T: I2cInstance + 'static> Sensors<T> {
     /// | MAG2   | mag2_pwr  | A1 (0x22)     |
     /// | MAG3   | mag3_pwr  | A0 (0x35)     |
     ///
-    /// All are configured for Master Controlled mode with Short sensitivity.
+    /// This mirrors the C++ firmware sequence:
+    /// - all power rails off
+    /// - power on MAG1 at A0, move to A2
+    /// - power on MAG2 at A0, move to A1
+    /// - power on MAG3 at A0 (kept at A0)
+    ///
+    /// Sensors run in low-power mode with fast update-rate bit.
     pub async fn init(
         bus: &'static SharedBus<T>,
         mut mag1_pwr: Output<'static>,
         mut mag2_pwr: Output<'static>,
         mut mag3_pwr: Output<'static>,
     ) -> Result<Self, SensorError> {
-        // ── Power-off all sensors (long enough to fully discharge) ──
+        // Match C++ startup: force all rails low first.
         mag1_pwr.set_low();
         mag2_pwr.set_low();
         mag3_pwr.set_low();
-        embassy_time::Timer::after_millis(500).await;
+        embassy_time::Timer::after_millis(5).await;
 
         let mut delay = Delay;
 
-        // ── MAG 1 (bottom): discover current address, then reassign to A2 ──
-        info!("MAG1: power on, discovering…");
+        // ── MAG1 (bottom): start at A0, then move to A2 ──
+        info!("MAG1: power on");
         mag1_pwr.set_high();
-        embassy_time::Timer::after_millis(50).await;
-        let mut mag1 = Self::find_sensor(bus, &mut delay).await?;
+        embassy_time::Timer::after_millis(5).await;
+        let mut mag1 = tli493d::Tli493d::new(
+            I2cDevice::new(bus),
+            &mut delay,
+            AddressSlot::A0,
+            PowerMode::LowPower,
+        )
+        .await?;
         mag1.set_address_slot(AddressSlot::A2).await?;
+        // A2B6 supports Full and Short (x2). EXTRA_SHORT is not available.
         mag1.set_sensitivity(A2B6Sensitivity::Short).await?;
+        mag1.set_update_rate(UpdateRate::Fast).await?;
         info!("MAG1: ready at A2");
 
-        // ── MAG 2 (top-left): discover current address, then reassign to A1 ──
-        info!("MAG2: power on, discovering…");
+        // ── MAG2 (top-left): start at A0, then move to A1 ──
+        info!("MAG2: power on");
         mag2_pwr.set_high();
-        embassy_time::Timer::after_millis(50).await;
-        let mut mag2 = Self::find_sensor(bus, &mut delay).await?;
+        embassy_time::Timer::after_millis(5).await;
+        let mut mag2 = tli493d::Tli493d::new(
+            I2cDevice::new(bus),
+            &mut delay,
+            AddressSlot::A0,
+            PowerMode::LowPower,
+        )
+        .await?;
         mag2.set_address_slot(AddressSlot::A1).await?;
         mag2.set_sensitivity(A2B6Sensitivity::Short).await?;
+        mag2.set_update_rate(UpdateRate::Fast).await?;
         info!("MAG2: ready at A1");
 
-        // ── MAG 3 (top-right): discover current address, stays as-is ──
-        info!("MAG3: power on, discovering…");
+        // ── MAG3 (top-right): start and remain at A0 ──
+        info!("MAG3: power on");
         mag3_pwr.set_high();
-        embassy_time::Timer::after_millis(50).await;
-        let mut mag3 = Self::find_sensor(bus, &mut delay).await?;
+        embassy_time::Timer::after_millis(5).await;
+        let mut mag3 = tli493d::Tli493d::new(
+            I2cDevice::new(bus),
+            &mut delay,
+            AddressSlot::A0,
+            PowerMode::LowPower,
+        )
+        .await?;
         mag3.set_sensitivity(A2B6Sensitivity::Short).await?;
+        mag3.set_update_rate(UpdateRate::Fast).await?;
         info!("MAG3: ready");
 
         info!("Sensors ready");
         Ok(Self { mag1, mag2, mag3 })
-    }
-
-    /// Try each address slot; return the first sensor that initializes.
-    async fn find_sensor(
-        bus: &'static SharedBus<T>,
-        delay: &mut Delay,
-    ) -> Result<Tli493dA2b6<SensorI2c<T>>, SensorError> {
-        for &slot in &AddressSlot::ALL {
-            match tli493d::Tli493d::new(
-                I2cDevice::new(bus),
-                delay,
-                slot,
-                PowerMode::MasterControlled,
-            )
-            .await
-            {
-                Ok(s) => {
-                    info!("  found at 0x{:02X}", slot.as_7bit());
-                    return Ok(s);
-                }
-                Err(_) => continue,
-            }
-        }
-        // Last attempt to get a proper error
-        tli493d::Tli493d::new(
-            I2cDevice::new(bus),
-            delay,
-            AddressSlot::A0,
-            PowerMode::MasterControlled,
-        )
-        .await
     }
 
     /// Read raw 12-bit values from all three sensors.
