@@ -11,13 +11,12 @@ use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Ticker, with_timeout};
 use embassy_usb::UsbDevice;
-use embassy_usb::class::cdc_acm::{CdcAcmClass, State, Sender};
+use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use static_cell::StaticCell;
 use tli493d::Error as TliError;
-use defmt_embassy_usbserial as _;
+use defmt_rtt as _;
 use {panic_probe as _};
 
-mod reset_interface;
 mod sensors;
 
 bind_interrupts!(struct UsbIrqs {
@@ -78,20 +77,10 @@ async fn main(spawner: Spawner) {
         CdcAcmClass::new(&mut builder, state, 64)
     };
 
-    // CDC ACM for defmt logs
-    let defmt_class = {
-        static STATE: StaticCell<State> = StaticCell::new();
-        let state = STATE.init(State::new());
-        CdcAcmClass::new(&mut builder, state, 64)
-    };
-
-    reset_interface::ResetHandler::install(&mut builder);
     let usb = builder.build();
 
     // Background tasks
     unwrap!(spawner.spawn(usb_task(usb)));
-    let (defmt_sender, _) = defmt_class.split();
-    unwrap!(spawner.spawn(defmt_logger_task(defmt_sender)));
 
     // ── Wait for USB enumeration ──
     embassy_time::Timer::after_millis(1500).await;
@@ -185,9 +174,4 @@ async fn main(spawner: Spawner) {
 #[embassy_executor::task]
 async fn usb_task(mut usb: MyUsbDevice) -> ! {
     usb.run().await
-}
-
-#[embassy_executor::task]
-async fn defmt_logger_task(sender: Sender<'static, MyUsbDriver>) {
-    defmt_embassy_usbserial::logger(sender).await;
 }
