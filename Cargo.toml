@@ -32,6 +32,7 @@ embassy-usb = "0.5.1"
 static_cell = "2.1.1"
 tli493d = { path = "../tli493d", features = ["defmt"] }
 embassy-embedded-hal = "0.6.0"
+smart-leds = "0.4.0"
 [profile.release]
 debug = 2
 lto = true

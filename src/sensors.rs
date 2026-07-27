@@ -1,6 +1,6 @@
 use core::fmt::Write;
 
-use defmt::info;
+use defmt::{info, warn};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_embedded_hal::shared_bus::I2cDeviceError;
 use embassy_rp::gpio::Output;
@@ -8,6 +8,7 @@ use embassy_rp::i2c::{Async, Error as RpI2cError, I2c, Instance as I2cInstance};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Delay;
+use embedded_hal_async::i2c::I2c as _;
 use tli493d::{AddressSlot, A2B6Sensitivity, PowerMode, Tli493dA2b6, UpdateRate};
 
 /// I2C bus shared across the three sensors.
@@ -99,13 +100,24 @@ async fn bring_up<T: I2cInstance + 'static>(
     pwr.set_high();
     embassy_time::Timer::after_millis(5).await;
 
-    let mut sensor = tli493d::Tli493d::new(
+    let new_result = tli493d::Tli493d::new(
         I2cDevice::new(bus),
         delay,
         AddressSlot::A0,
         PowerMode::LowPower,
     )
-    .await?;
+    .await;
+    let mut sensor = match new_result {
+        Ok(s) => s,
+        Err(e) => {
+            // `pwr` is still driven high here (unlike in main.rs, where the
+            // pin is dropped/floated once `Sensors::init` returns its error),
+            // so this scan actually sees whatever is on the bus for `label`.
+            warn!("{}: init failed, scanning bus", label);
+            scan_bus(bus).await;
+            return Err(e);
+        }
+    };
 
     if let Some(slot) = target {
         sensor.set_address_slot(slot).await?;
@@ -117,6 +129,27 @@ async fn bring_up<T: I2cInstance + 'static>(
 
     info!("{}: ready", label);
     Ok(sensor)
+}
+
+/// Probe every valid 7-bit I2C address and log which ones ACK.
+///
+/// Diagnostic helper for when sensor init fails: distinguishes "nothing on
+/// the bus" (wiring/power/pull-up problem) from "something answered, but not
+/// at the expected address" (address-sampling or driver-state problem).
+async fn scan_bus<T: I2cInstance + 'static>(bus: &'static SharedBus<T>) {
+    let mut dev = I2cDevice::new(bus);
+    let mut buf = [0u8; 1];
+    info!("I2C bus scan:");
+    let mut found = false;
+    for addr in 0x08u8..=0x77 {
+        if dev.read(addr, &mut buf).await.is_ok() {
+            info!("  ACK at 0x{:02x}", addr);
+            found = true;
+        }
+    }
+    if !found {
+        info!("  no devices responded");
+    }
 }
 
 /// Format 9 raw sensor values as a CSV line into `buf`.

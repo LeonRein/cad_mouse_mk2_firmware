@@ -139,6 +139,7 @@ dependencies = [
  "embedded-io-async 0.7.0",
  "embedded-storage",
  "panic-probe",
+ "smart-leds",
  "static_cell",
  "tli493d",
 ]

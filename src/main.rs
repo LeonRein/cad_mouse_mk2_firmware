@@ -6,18 +6,25 @@ use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::i2c::{Config as I2cConfig, I2c, InterruptHandler};
-use embassy_rp::peripherals::USB;
+use embassy_rp::peripherals::{PIO0, USB};
+use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
+use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Ticker, with_timeout};
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use smart_leds::RGB8;
 use static_cell::StaticCell;
 use tli493d::Error as TliError;
 use defmt_rtt as _;
 use {panic_probe as _};
 
 mod sensors;
+
+/// LED ring on the CAD Mouse MK2: 8 WS2812 pixels (see original_firmware
+/// `Config::LED_COUNT`).
+const LED_COUNT: usize = 8;
 
 bind_interrupts!(struct UsbIrqs {
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
@@ -27,6 +34,10 @@ bind_interrupts!(struct I2cIrqs {
     I2C1_IRQ => InterruptHandler<embassy_rp::peripherals::I2C1>;
 });
 
+bind_interrupts!(struct PioIrqs {
+    PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
+});
+
 type MyUsbDriver = Driver<'static, USB>;
 type MyUsbDevice = UsbDevice<'static, MyUsbDriver>;
 
@@ -34,10 +45,22 @@ type MyUsbDevice = UsbDevice<'static, MyUsbDriver>;
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
-    // Hold LED pins low so they don't float and light up unexpectedly.
-    // XIAO RP2350: PIN_LED_DATA = D3 = GPIO29, PIN_LED_LS = D1 = GPIO27.
-    let _led_data = embassy_rp::gpio::Output::new(p.PIN_29, embassy_rp::gpio::Level::Low);
-    let _led_ls = embassy_rp::gpio::Output::new(p.PIN_27, embassy_rp::gpio::Level::Low);
+    // LED ring: 8x WS2812 on D3/GPIO5 (data, driven via PIO) with a level
+    // shifter enable on D1/GPIO27. Blinks continuously from boot as a
+    // hardware-alive indicator, independent of USB/sensor state.
+    //
+    // Note: D3 is GPIO5 on the XIAO RP2350, *not* GPIO29 like on the XIAO
+    // RP2040 the original C firmware's pin table was written for — the two
+    // boards share the same D-to-GPIO mapping everywhere else (D1, D4, D5,
+    // D8, D9, D10 are all identical), but D3 was remapped on the RP2350.
+    let led_ls = Output::new(p.PIN_27, Level::High);
+    let Pio {
+        mut common, sm0, ..
+    } = Pio::new(p.PIO0, PioIrqs);
+    let ws2812_program = PioWs2812Program::new(&mut common);
+    let ws2812: PioWs2812<'_, PIO0, 0, LED_COUNT, Grb> =
+        PioWs2812::new(&mut common, sm0, p.DMA_CH0, p.PIN_5, &ws2812_program);
+    unwrap!(spawner.spawn(led_task(led_ls, ws2812)));
 
     // ── USB setup ──
     let driver = Driver::new(p.USB, UsbIrqs);
@@ -174,4 +197,22 @@ async fn main(spawner: Spawner) {
 #[embassy_executor::task]
 async fn usb_task(mut usb: MyUsbDevice) -> ! {
     usb.run().await
+}
+
+/// Blinks the whole LED ring dim green as a hardware-alive heartbeat.
+/// `_led_ls` is held for the task's lifetime so the level-shifter enable
+/// pin stays driven high (dropping it would float the pin).
+#[embassy_executor::task]
+async fn led_task(_led_ls: Output<'static>, mut ws2812: PioWs2812<'static, PIO0, 0, LED_COUNT, Grb>) -> ! {
+    info!("LED task started");
+    let on = [RGB8::new(0, 20, 0); LED_COUNT];
+    let off = [RGB8::default(); LED_COUNT];
+    loop {
+        ws2812.write(&on).await;
+        info!("LED on");
+        embassy_time::Timer::after_millis(300).await;
+        ws2812.write(&off).await;
+        info!("LED off");
+        embassy_time::Timer::after_millis(300).await;
+    }
 }
