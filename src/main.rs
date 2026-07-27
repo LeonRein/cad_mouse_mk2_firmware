@@ -11,7 +11,7 @@ use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Ticker, with_timeout};
+use embassy_time::{Duration, Instant, Ticker, with_timeout};
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use smart_leds::RGB8;
@@ -159,6 +159,9 @@ async fn main(spawner: Spawner) {
         match sensors {
             Some(ref mut s) => {
                 let mut poll = Ticker::every(Duration::from_millis(1));
+                // Counts every attempted sample, successful or not, so that a
+                // gap in the host's log unambiguously means a lost frame.
+                let mut seq: u16 = 0;
                 loop {
                     let raw = match s.read_raw().await {
                         Ok(r) => r,
@@ -167,16 +170,18 @@ async fn main(spawner: Spawner) {
                                 TliError::AdcLockup | TliError::DataNotReady => {}
                                 _ => warn!("read error: {}", defmt::Debug2Format(&e)),
                             }
+                            seq = seq.wrapping_add(1);
                             poll.next().await;
                             continue;
                         }
                     };
-                    let mut buf = [0u8; 128];
-                    let n = sensors::format_csv(&raw, &mut buf);
-                    if data_class.write_packet(&buf[..n]).await.is_err() {
+                    let t_us = Instant::now().as_micros() as u32;
+                    let mut buf = [0u8; sensors::FRAME_LEN];
+                    sensors::format_frame(seq, t_us, &raw, &mut buf);
+                    if data_class.write_packet(&buf).await.is_err() {
                         break;
                     }
-                    info!("Sent data");
+                    seq = seq.wrapping_add(1);
                     poll.next().await;
                 }
             }

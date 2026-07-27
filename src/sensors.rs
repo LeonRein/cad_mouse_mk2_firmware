@@ -1,5 +1,3 @@
-use core::fmt::Write;
-
 use defmt::{info, warn};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_embedded_hal::shared_bus::I2cDeviceError;
@@ -152,37 +150,45 @@ async fn scan_bus<T: I2cInstance + 'static>(bus: &'static SharedBus<T>) {
     }
 }
 
-/// Format 9 raw sensor values as a CSV line into `buf`.
+/// Sync word starting every frame, little-endian on the wire.
 ///
-/// Returns the number of bytes written. If the buffer is too small,
-/// the output is truncated.
-pub fn format_csv(raw: &[i16; 9], buf: &mut [u8]) -> usize {
-    struct BufWriter<'a> {
-        buf: &'a mut [u8],
-        pos: usize,
-    }
-    impl Write for BufWriter<'_> {
-        fn write_str(&mut self, s: &str) -> core::fmt::Result {
-            let bytes = s.as_bytes();
-            let rem = self.buf.len() - self.pos;
-            let n = bytes.len().min(rem);
-            self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
-            self.pos += n;
-            if n < bytes.len() {
-                Err(core::fmt::Error)
-            } else {
-                Ok(())
-            }
-        }
-    }
+/// The host needs a way to resynchronise: USB CDC is a byte stream with no
+/// record boundaries, so a reader that attaches mid-frame has to find the start
+/// of the next one.
+pub const FRAME_MAGIC: u16 = 0xA55A;
 
-    let mut w = BufWriter { buf, pos: 0 };
+/// Wire size of one sample frame.
+///
+/// Deliberately under the 64-byte USB full-speed bulk packet limit so a frame is
+/// always exactly one `write_packet` -- no fragmentation, no zero-length-packet
+/// handling on either side.
+pub const FRAME_LEN: usize = 26;
+
+/// Serialize one sample as a fixed-size binary frame.
+///
+/// Layout, all little-endian:
+///
+/// | offset | size | field                                    |
+/// |--------|------|------------------------------------------|
+/// | 0      | 2    | [`FRAME_MAGIC`]                          |
+/// | 2      | 2    | `seq`, wrapping frame counter            |
+/// | 4      | 4    | `t_us`, device uptime in microseconds    |
+/// | 8      | 18   | nine `i16` raw counts, MAG1/2/3 x,y,z    |
+///
+/// Binary rather than the CSV this replaced: a worst-case CSV line plus the new
+/// fields would have exceeded the 64-byte packet and been silently truncated,
+/// and formatting nine integers per sample at ~770 Hz is real work for no gain.
+///
+/// `seq` increments on *every* attempted read, including ones that failed, so a
+/// gap in the host's log means precisely "a sample was lost" rather than "the
+/// hand stopped moving". Without it, dropped frames are invisible and any
+/// velocity estimate derived from the stream is quietly wrong.
+pub fn format_frame(seq: u16, t_us: u32, raw: &[i16; 9], buf: &mut [u8; FRAME_LEN]) {
+    buf[0..2].copy_from_slice(&FRAME_MAGIC.to_le_bytes());
+    buf[2..4].copy_from_slice(&seq.to_le_bytes());
+    buf[4..8].copy_from_slice(&t_us.to_le_bytes());
     for (i, &v) in raw.iter().enumerate() {
-        if i > 0 {
-            let _ = write!(w, ",");
-        }
-        let _ = write!(w, "{}", v);
+        let at = 8 + i * 2;
+        buf[at..at + 2].copy_from_slice(&v.to_le_bytes());
     }
-    let _ = writeln!(w);
-    w.pos
 }

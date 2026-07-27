@@ -1,0 +1,29 @@
+[project]
+name = "cadmouse"
+version = "0.1.0"
+description = "6-DOF pose estimation for the CAD Mouse MK2 magnetic knob"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.14",
+    "pyserial>=3.5",
+    "matplotlib>=3.9",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cadmouse"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The slow tests run the full joint optimisation and take minutes. They are the
+# ones that actually gate trusting a fit, so they are excluded by default rather
+# than deleted: run `uv run pytest -m slow` before believing a calibration.
+addopts = "-m 'not slow'"
+markers = ["slow: full calibration runs, minutes each"]

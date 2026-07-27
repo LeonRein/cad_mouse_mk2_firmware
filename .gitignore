@@ -1,3 +1,9 @@
 # Cargo build artifacts
 /target/
 **/.idea
+
+# Python / uv
+__pycache__/
+.pytest_cache/
+scripts/.venv/
+scripts/data/
