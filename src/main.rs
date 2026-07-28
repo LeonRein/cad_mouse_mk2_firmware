@@ -11,12 +11,11 @@ use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Instant, Ticker, with_timeout};
+use embassy_time::{Duration, Instant, with_timeout};
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use smart_leds::RGB8;
 use static_cell::StaticCell;
-use tli493d::Error as TliError;
 use defmt_rtt as _;
 use {panic_probe as _};
 
@@ -115,7 +114,7 @@ async fn main(spawner: Spawner) {
     // Configure I2C bus and power outputs (only main.rs knows the pins).
     let i2c_cfg = {
         let mut c = I2cConfig::default();
-        c.frequency = 400_000;
+        c.frequency = 1_000_000;
         c
     };
     // XIAO RP2350: I2C1 on D5 = GPIO7 (SCL) and D4 = GPIO6 (SDA).
@@ -158,20 +157,42 @@ async fn main(spawner: Spawner) {
 
         match sensors {
             Some(ref mut s) => {
-                let mut poll = Ticker::every(Duration::from_millis(1));
+                // Deliberately unpaced. Reads block on clock stretching until the
+                // sensor has converted, so the loop already self-clocks at the
+                // rate the hardware sustains, and `write_packet` bounds the USB
+                // side. A device-side timer here would be a second clock beating
+                // against the USB host's, which owns the only 1 kHz that matters
+                // — and `Ticker` compounds that by never re-syncing to `now`, so
+                // any stall is repaid as an unpaced burst of back-to-back samples
+                // that breaks the uniform sampling downstream estimation assumes.
+                //
                 // Counts every attempted sample, successful or not, so that a
                 // gap in the host's log unambiguously means a lost frame.
                 let mut seq: u16 = 0;
+                let mut errors: u32 = 0;
+                let mut sent: u32 = 0;
+                let mut window_start = Instant::now();
+                let mut window_sent: u32 = 0;
                 loop {
                     let raw = match s.read_raw().await {
                         Ok(r) => r,
                         Err(e) => {
-                            match e {
-                                TliError::AdcLockup | TliError::DataNotReady => {}
-                                _ => warn!("read error: {}", defmt::Debug2Format(&e)),
+                            // Under master-controlled triggering a read that
+                            // yields nothing is a genuine fault, not the routine
+                            // "sensor hasn't converted yet" that the old
+                            // free-running configuration produced constantly.
+                            // Log the first, then sample, so a persistent fault
+                            // is visible without flooding the transport.
+                            errors += 1;
+                            if errors == 1 || errors % 256 == 0 {
+                                warn!("read error #{} (sent {}): {}", errors, sent, e);
                             }
                             seq = seq.wrapping_add(1);
-                            poll.next().await;
+                            // Back off only on the error path. A failing read can
+                            // return in microseconds (a NACK from a sensor that
+                            // lost power, say), and without this the loop would
+                            // spin on the bus and starve the USB task.
+                            embassy_time::Timer::after_millis(1).await;
                             continue;
                         }
                     };
@@ -182,7 +203,24 @@ async fn main(spawner: Spawner) {
                         break;
                     }
                     seq = seq.wrapping_add(1);
-                    poll.next().await;
+                    sent += 1;
+                    window_sent += 1;
+
+                    // Report achieved rate independently of the host, so the
+                    // readout strategy can be judged without trusting record.py.
+                    let elapsed = window_start.elapsed();
+                    if elapsed >= Duration::from_secs(5) {
+                        let hz = window_sent * 1000 / elapsed.as_millis() as u32;
+                        info!(
+                            "stream: {} Hz, {} sent, {} errors, DIAG={:02x}",
+                            hz,
+                            sent,
+                            errors,
+                            s.diag_bytes()
+                        );
+                        window_start = Instant::now();
+                        window_sent = 0;
+                    }
                 }
             }
             None => {
@@ -214,10 +252,10 @@ async fn led_task(_led_ls: Output<'static>, mut ws2812: PioWs2812<'static, PIO0,
     let off = [RGB8::default(); LED_COUNT];
     loop {
         ws2812.write(&on).await;
-        info!("LED on");
+        // info!("LED on");
         embassy_time::Timer::after_millis(300).await;
         ws2812.write(&off).await;
-        info!("LED off");
+        // info!("LED off");
         embassy_time::Timer::after_millis(300).await;
     }
 }

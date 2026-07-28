@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import glob
 import struct
+import time
 from dataclasses import dataclass, field
 from typing import Iterator
 
@@ -171,12 +172,52 @@ def read_frames(
                 yield frame, stats
 
 
+def collect_for(
+    seconds: float,
+    port: str | None = None,
+    on_frame=None,
+) -> tuple[np.ndarray, np.ndarray, StreamStats]:
+    """Read frames for `seconds` of wall-clock time.
+
+    Prefer this over `collect` for anything a human is timing. The device's
+    frame rate is a property of the sensor readout -- it is bounded by ADC
+    conversion and I2C throughput, not by anything the host chooses -- so asking
+    for a frame *count* is really asking for an unknown duration. Wall clock is
+    also the right clock here specifically because the caller is pacing a person
+    ("sweep for six seconds"), not sampling a signal.
+    """
+    counts: list[np.ndarray] = []
+    times: list[int] = []
+    stats = StreamStats()
+    deadline = time.monotonic() + seconds
+
+    for frame, stats in read_frames(port):
+        counts.append(frame.counts)
+        times.append(frame.t_us)
+        if on_frame is not None:
+            on_frame(len(counts) - 1, frame, stats)
+        if time.monotonic() >= deadline:
+            break
+
+    if not counts:
+        return np.empty((0, 9), np.int16), np.empty(0, np.int64), stats
+    return (
+        np.array(counts, dtype=np.int16),
+        np.array(times, dtype=np.int64),
+        stats,
+    )
+
+
 def collect(
     n: int,
     port: str | None = None,
     on_frame=None,
 ) -> tuple[np.ndarray, np.ndarray, StreamStats]:
-    """Read exactly `n` frames. Returns ``(counts (n, 9), t_us (n,), stats)``."""
+    """Read exactly `n` frames. Returns ``(counts (n, 9), t_us (n,), stats)``.
+
+    Takes as long as it takes; use `collect_for` when the duration is what
+    matters.
+    """
     counts = np.empty((n, 9), dtype=np.int16)
     times = np.empty(n, dtype=np.int64)
     stats = StreamStats()

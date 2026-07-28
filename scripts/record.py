@@ -20,13 +20,14 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
 
 from cadmouse import geometry
 from cadmouse.calibrate import HELDOUT_SEGMENT, REST_SEGMENT
-from cadmouse.stream import StreamStats, collect, find_port, read_frames
+from cadmouse.stream import StreamStats, collect_for, find_port, read_frames
 
 #: (label, seconds, instruction). Every sweep is bracketed by a rest block: they
 #: pin the pose origin, and interleaving them spreads any slow bias drift across
@@ -54,11 +55,6 @@ DEFAULT_PLAN: list[tuple[str, float, str]] = [
     (REST_SEGMENT, 2.0, "Hands off. Done after this."),
 ]
 
-#: Nominal sample rate. The sensor's internal update rate caps around 770 Hz
-#: (`../tli493d/src/driver.rs`), so this is what a healthy link looks like.
-NOMINAL_RATE_HZ = 770.0
-
-
 def _prompt(message: str) -> None:
     print(f"\n>>> {message}")
     input("    Press Enter when ready...")
@@ -67,8 +63,11 @@ def _prompt(message: str) -> None:
 def check_link(port: str | None, seconds: float = 3.0) -> StreamStats:
     """Report frame rate, loss, and clipping without recording anything."""
     print(f"Reading {seconds:.0f} s from {port or find_port()} ...")
-    n = int(NOMINAL_RATE_HZ * seconds)
-    counts, _, stats = collect(n, port=port)
+    counts, _, stats = collect_for(seconds, port=port)
+
+    if not len(counts):
+        print("  no frames received -- is the firmware streaming?")
+        return stats
 
     print(f"  {stats.summary()}")
     peak = int(np.abs(counts).max())
@@ -93,22 +92,33 @@ def check_link(port: str | None, seconds: float = 3.0) -> StreamStats:
 def record_segment(
     label: str, seconds: float, port: str | None, writer: csv.writer
 ) -> int:
-    n = int(NOMINAL_RATE_HZ * seconds)
+    """Record one prompted segment for `seconds`, streaming rows to `writer`.
+
+    Timed, not counted. The instruction on screen asks a person to sweep an axis
+    for a stated number of seconds, so the segment has to end when that many
+    seconds have passed -- whatever rate the device happens to be running at.
+    """
     written = 0
+    started = time.monotonic()
+    deadline = started + seconds
     for frame, stats in read_frames(port):
         writer.writerow([label, frame.seq, frame.t_us, *frame.counts.tolist()])
         written += 1
+        now = time.monotonic()
         if written % 128 == 0:
-            pct = 100 * written / n
+            pct = 100 * min(1.0, (now - started) / seconds)
             print(
                 f"\r    {label:5s} {pct:5.1f}%  {stats.rate_hz:4.0f} Hz  "
                 f"{stats.loss_fraction:.1%} lost",
                 end="",
                 flush=True,
             )
-        if written >= n:
+        if now >= deadline:
             break
-    print(f"\r    {label:5s} done, {written} frames" + " " * 24)
+    elapsed = time.monotonic() - started
+    print(
+        f"\r    {label:5s} done, {written} frames in {elapsed:.1f} s" + " " * 16
+    )
     return written
 
 
