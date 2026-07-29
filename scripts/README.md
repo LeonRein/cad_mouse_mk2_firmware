@@ -18,6 +18,28 @@ Everything here is Python, run with [uv](https://docs.astral.sh/uv/).
 root, so `uv run record.py` works and `uv run scripts/record.py` from the repo
 root does not.
 
+## The pipeline
+
+Four steps, in order, one script each:
+
+```
+uv run record.py    -o data/session1.csv       # capture ~90 s from the device
+uv run calibrate.py data/session1.csv -o calibration.json
+uv run view.py      calibration.json           # watch it live, check the signs
+uv run export.py    calibration.json           # emit table + calibration for the firmware
+```
+
+Each has `--help`, and each has a section below. `calibrate.py` and `export.py`
+are thin wrappers over `cadmouse/calibrate.py` and `cadmouse/export.py`, which
+is where the work and the explanations live.
+
+One diagnostic sits outside that flow, since it answers a design question
+rather than producing an artefact:
+
+```
+uv run python -m cadmouse.filter data/session1.csv calibration.json  # IEKF vs UKF
+```
+
 ## Recording a session
 
 Flash firmware that includes the binary stream (`format_frame` in
@@ -109,7 +131,7 @@ Measured against `data/session1.csv`, with nominal geometry (see
 ## Calibrating
 
 ```
-uv run python -m cadmouse.calibrate data/session1.csv -o calibration.json
+uv run calibrate.py data/session1.csv -o calibration.json
 ```
 
 A bundle adjustment: 27 calibration parameters and the pose of every fitted
@@ -265,7 +287,7 @@ backend.
 ## Exporting to the firmware
 
 ```
-uv run python -m cadmouse.export calibration.json
+uv run export.py calibration.json
 ```
 
 Writes `gen/field_table.bin` (85 kB of raw little-endian `f32`, pulled in with
