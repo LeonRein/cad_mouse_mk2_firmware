@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Guided capture of a calibration session.
 
-Walks you through the motions the calibration needs and writes one CSV. The
-prompts matter: the fit uses the segment label to know which DOF you were
-*asked* to move, and it uses the ``rest`` blocks to define pose zero and to
-measure the sensor noise.
+Walks you through the motions a calibration needs and writes one CSV. The
+prompts matter: a fit uses the segment label to know which DOF you were *asked*
+to move, and it uses the ``rest`` blocks to define pose zero and to measure the
+sensor noise.
 
     uv run record.py --check              # link health only, no file
     uv run record.py -o data/session1.csv
@@ -13,21 +13,63 @@ Move slowly -- several seconds per traverse. The three sensors are read
 sequentially over one I2C bus (``src/sensors.rs`` ``read_raw``), so a fast motion
 smears the three readings across a few hundred microseconds of different poses.
 That is harmless for quasi-static calibration data and unfixable here.
+
+This script is deliberately self-contained: stdlib plus pyserial, no shared
+package. It is pure data capture and has no opinion about how the poses are
+later estimated, so it survives rewrites of the estimator.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import glob
+import struct
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator
 
-import numpy as np
+# --------------------------------------------------------------------------
+# Wire format
+#
+# Defined by `format_frame` in ``src/sensors.rs`` and must be kept in step with
+# it:
+#
+#   offset  size  field
+#   0          2  magic 0xA55A
+#   2          2  seq, wrapping frame counter
+#   4          4  t_us, device uptime in microseconds
+#   8         18  nine int16 raw counts, MAG1/2/3 x,y,z
+#
+# The sequence number is the point of the whole exercise. The firmware
+# increments it on every *attempted* read including failed ones, so a gap here
+# means a sample was genuinely lost rather than the hand having paused -- which
+# is the difference between a usable velocity estimate and a quietly wrong one.
+# --------------------------------------------------------------------------
 
-from cadmouse import geometry
-from cadmouse.calibrate import HELDOUT_SEGMENT, REST_SEGMENT
-from cadmouse.stream import StreamStats, collect_for, find_port, read_frames
+FRAME_MAGIC = 0xA55A
+FRAME_LEN = 26
+_FRAME = struct.Struct("<HHI9h")
+
+assert _FRAME.size == FRAME_LEN, "struct format out of step with FRAME_LEN"
+
+#: The firmware's USB identity (`src/main.rs`): VID 0xc0de, PID 0xcafe,
+#: manufacturer "CAD Mouse", product "CAD Mouse MK2", serial "00000001".
+DEVICE_GLOB = "/dev/serial/by-id/*CAD_Mouse*"
+
+#: Channel order of the 9-vector, matching the firmware's ``[i16; 9]``
+#: (``src/sensors.rs`` ``read_raw``) and the C++ reference's ``readRaw``.
+CHANNEL_NAMES = [f"mag{i + 1}{ax}" for i in range(3) for ax in "xyz"]
+
+#: Raw counts are sign-extended 12-bit (`../tli493d/src/register.rs`), so a
+#: reading at this magnitude means the ADC railed and the sample is unusable.
+ADC_FULL_SCALE_COUNTS = 2047
+
+#: Segment labels with meaning beyond "this was the axis I asked for".
+REST_SEGMENT = "rest"
+HELDOUT_SEGMENT = "free"
 
 #: (label, seconds, instruction). Every sweep is bracketed by a rest block: they
 #: pin the pose origin, and interleaving them spreads any slow bias drift across
@@ -55,6 +97,138 @@ DEFAULT_PLAN: list[tuple[str, float, str]] = [
     (REST_SEGMENT, 2.0, "Hands off. Done after this."),
 ]
 
+
+def find_port() -> str:
+    """Locate the device's CDC data interface.
+
+    Prefers the stable ``by-id`` symlink over ``/dev/ttyACM*``, which renumbers
+    between plug-ins. The firmware exposes one CDC class, so the first match is
+    the data interface.
+    """
+    matches = sorted(glob.glob(DEVICE_GLOB))
+    if not matches:
+        raise FileNotFoundError(
+            f"no CAD Mouse found at {DEVICE_GLOB}. Is it plugged in and running "
+            "firmware with the binary stream (see src/sensors.rs format_frame)?"
+        )
+    return matches[0]
+
+
+@dataclass
+class Frame:
+    seq: int
+    t_us: int
+    counts: tuple[int, ...]  # nine raw counts, MAG1/2/3 x,y,z
+
+
+@dataclass
+class FrameDecoder:
+    """Incremental byte-stream decoder with resynchronisation.
+
+    USB CDC carries no record boundaries, so a reader that attaches mid-frame
+    lands at an arbitrary offset. Scanning for the magic word recovers, and
+    `resyncs` counts how often that was needed -- a nonzero value on a settled
+    link means frames are being corrupted, not merely dropped.
+    """
+
+    buffer: bytearray = field(default_factory=bytearray)
+    resyncs: int = 0
+
+    def feed(self, chunk: bytes) -> Iterator[Frame]:
+        self.buffer.extend(chunk)
+        while len(self.buffer) >= FRAME_LEN:
+            if not (
+                self.buffer[0] == (FRAME_MAGIC & 0xFF)
+                and self.buffer[1] == (FRAME_MAGIC >> 8)
+            ):
+                start = self.buffer.find(FRAME_MAGIC.to_bytes(2, "little"), 1)
+                if start < 0:
+                    # Keep one byte: the magic may straddle the next chunk.
+                    del self.buffer[:-1]
+                    return
+                del self.buffer[:start]
+                self.resyncs += 1
+                continue
+
+            magic, seq, t_us, *counts = _FRAME.unpack_from(self.buffer, 0)
+            del self.buffer[:FRAME_LEN]
+            if magic != FRAME_MAGIC:  # defensive; the scan above should prevent it
+                self.resyncs += 1
+                continue
+            yield Frame(seq=seq, t_us=t_us, counts=tuple(counts))
+
+
+@dataclass
+class StreamStats:
+    """Link health, accumulated as frames arrive."""
+
+    received: int = 0
+    dropped: int = 0
+    resyncs: int = 0
+    first_t_us: int | None = None
+    last_t_us: int | None = None
+    _last_seq: int | None = None
+
+    def observe(self, frame: Frame) -> None:
+        if self._last_seq is not None:
+            gap = (frame.seq - self._last_seq - 1) & 0xFFFF
+            # A huge "gap" is a rewind (device reset), not 65k lost frames.
+            if gap < 0x8000:
+                self.dropped += gap
+        self._last_seq = frame.seq
+        self.received += 1
+        if self.first_t_us is None:
+            self.first_t_us = frame.t_us
+        self.last_t_us = frame.t_us
+
+    @property
+    def duration_s(self) -> float:
+        if self.first_t_us is None or self.last_t_us is None:
+            return 0.0
+        return ((self.last_t_us - self.first_t_us) & 0xFFFFFFFF) / 1e6
+
+    @property
+    def rate_hz(self) -> float:
+        return self.received / self.duration_s if self.duration_s > 0 else 0.0
+
+    @property
+    def loss_fraction(self) -> float:
+        total = self.received + self.dropped
+        return self.dropped / total if total else 0.0
+
+    def summary(self) -> str:
+        return (
+            f"{self.received} frames in {self.duration_s:.1f} s "
+            f"({self.rate_hz:.0f} Hz), {self.dropped} dropped "
+            f"({self.loss_fraction:.2%}), {self.resyncs} resyncs"
+        )
+
+
+def read_frames(
+    port: str | None = None,
+    timeout: float = 1.0,
+    chunk: int = 4096,
+) -> Iterator[tuple[Frame, StreamStats]]:
+    """Yield frames from the device indefinitely, with running link stats."""
+    import serial  # imported lazily so --help needs no pyserial
+
+    port = port or find_port()
+    decoder = FrameDecoder()
+    stats = StreamStats()
+
+    # Baud rate is ignored by USB CDC but pyserial requires one.
+    with serial.Serial(port, baudrate=115200, timeout=timeout) as handle:
+        handle.reset_input_buffer()
+        while True:
+            data = handle.read(max(1, min(chunk, handle.in_waiting or 1)))
+            if not data:
+                continue
+            for frame in decoder.feed(data):
+                stats.resyncs = decoder.resyncs
+                stats.observe(frame)
+                yield frame, stats
+
+
 def _prompt(message: str) -> None:
     print(f"\n>>> {message}")
     input("    Press Enter when ready...")
@@ -63,28 +237,37 @@ def _prompt(message: str) -> None:
 def check_link(port: str | None, seconds: float = 3.0) -> StreamStats:
     """Report frame rate, loss, and clipping without recording anything."""
     print(f"Reading {seconds:.0f} s from {port or find_port()} ...")
-    counts, _, stats = collect_for(seconds, port=port)
 
-    if not len(counts):
+    peak = 0
+    saturated = 0
+    stats = StreamStats()
+    deadline = time.monotonic() + seconds
+    for frame, stats in read_frames(port):
+        largest = max(abs(c) for c in frame.counts)
+        peak = max(peak, largest)
+        if largest >= ADC_FULL_SCALE_COUNTS:
+            saturated += 1
+        if time.monotonic() >= deadline:
+            break
+
+    if not stats.received:
         print("  no frames received -- is the firmware streaming?")
         return stats
 
     print(f"  {stats.summary()}")
-    peak = int(np.abs(counts).max())
     print(
-        f"  peak |count| = {peak} of {geometry.ADC_FULL_SCALE_COUNTS} "
-        f"({peak / geometry.ADC_FULL_SCALE_COUNTS:.0%} of full scale)"
+        f"  peak |count| = {peak} of {ADC_FULL_SCALE_COUNTS} "
+        f"({peak / ADC_FULL_SCALE_COUNTS:.0%} of full scale)"
     )
 
     if stats.loss_fraction > 0.02:
         print("  WARNING: >2% frame loss. Check the USB link before recording.")
     if stats.resyncs:
         print("  WARNING: frame resyncs on a settled link means corruption.")
-    saturated = int(geometry.is_saturated(counts).sum())
     if saturated:
         print(
             f"  ERROR: {saturated} frames railed the ADC. Those carry no "
-            "information and the fit will refuse them."
+            "information and a fit will refuse them."
         )
     return stats
 
@@ -102,7 +285,7 @@ def record_segment(
     started = time.monotonic()
     deadline = started + seconds
     for frame, stats in read_frames(port):
-        writer.writerow([label, frame.seq, frame.t_us, *frame.counts.tolist()])
+        writer.writerow([label, frame.seq, frame.t_us, *frame.counts])
         written += 1
         now = time.monotonic()
         if written % 128 == 0:
@@ -116,9 +299,7 @@ def record_segment(
         if now >= deadline:
             break
     elapsed = time.monotonic() - started
-    print(
-        f"\r    {label:5s} done, {written} frames in {elapsed:.1f} s" + " " * 16
-    )
+    print(f"\r    {label:5s} done, {written} frames in {elapsed:.1f} s" + " " * 16)
     return written
 
 
@@ -151,13 +332,12 @@ def main(argv: list[str] | None = None) -> int:
     total = 0
     with args.output.open("w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["segment", "seq", "t_us", *geometry.CHANNEL_NAMES])
+        writer.writerow(["segment", "seq", "t_us", *CHANNEL_NAMES])
         for label, seconds, instruction in DEFAULT_PLAN:
             _prompt(f"[{label}] {instruction}  ({seconds:.0f} s)")
             total += record_segment(label, seconds, port, writer)
 
     print(f"\nWrote {total} frames to {args.output}")
-    print(f"Next: uv run fit.py {args.output}")
     return 0
 
 
