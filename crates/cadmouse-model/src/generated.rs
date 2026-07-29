@@ -7,10 +7,10 @@
 //! the constants needed to index it and the calibration it was fitted with.
 
 /// Bytes in `gen/field_table.bin`, checked against the include at compile time.
-pub const TABLE_BYTES: usize = 86856;
+pub const TABLE_BYTES: usize = 99144;
 
-pub const N_RHO: usize = 141;
-pub const N_Z: usize = 77;
+pub const N_RHO: usize = 153;
+pub const N_Z: usize = 81;
 pub const RHO0: f32 = -1.000000000e+00;
 pub const D_RHO: f32 = 2.500000000e-01;
 pub const Z0: f32 = -2.200000000e+01;
@@ -19,45 +19,41 @@ pub const D_Z: f32 = 2.500000000e-01;
 /// Tesla -> raw ADC counts, at the 2x sensitivity the firmware uses.
 pub const TESLA_TO_COUNTS: f32 = 1.540000000e+04;
 
-/// Magnet geometry the table was built for: 6.0 x 6.0 mm.
+/// Magnet geometry the table was built for: 6.0 x 3.0 mm.
 pub const MAGNET_DIAMETER_MM: f32 = 6.000000000e+00;
-pub const MAGNET_HEIGHT_MM: f32 = 6.000000000e+00;
+pub const MAGNET_HEIGHT_MM: f32 = 3.000000000e+00;
 
 /// Sensor positions in the board frame, millimetres. Held fixed by the
 /// calibration: they are pick-and-place coordinates and they break the
 /// rigid-body gauge freedom.
 pub const SENSOR_POS: [[f32; 3]; 3] = [
-    [0.000000000e+00, -1.651000000e+01, -1.800000000e+01],
-    [-1.430000000e+01, 8.260000000e+00, -1.800000000e+01],
-    [1.430000000e+01, 8.260000000e+00, -1.800000000e+01],
+    [1.010945933e-15, -1.651000000e+01, -1.800000000e+01],
+    [-1.429807942e+01, 8.255000000e+00, -1.800000000e+01],
+    [1.429807942e+01, 8.255000000e+00, -1.800000000e+01],
 ];
 
 /// Magnet centres in the knob body frame, millimetres.
 pub const MAGNET_POS: [[f32; 3]; 3] = [
-    [9.130519183e-02, -1.644514413e+01, -9.894508057e+00],
-    [-1.436568362e+01, 8.120308364e+00, -9.806906145e+00],
-    [1.355698401e+01, 8.570326500e+00, -9.428882117e+00],
+    [9.867250650e-02, -1.640842681e+01, -1.099290463e+01],
+    [-1.429958872e+01, 8.005822908e+00, -1.088243768e+01],
+    [1.355311227e+01, 8.403644225e+00, -1.048344029e+01],
 ];
 
-/// Unit magnetisation directions in the knob body frame. The reversed
-/// third magnet is carried by a negative moment, not a flipped axis.
+/// Unit magnetisation directions in the knob body frame. A reversed
+/// magnet is carried by a negative moment, not a flipped axis.
 pub const MAGNET_AXIS: [[f32; 3]; 3] = [
-    [-1.000111185e-02, -7.071076569e-02, 9.974467231e-01],
-    [-6.150058923e-02, 8.510131208e-02, 9.944724452e-01],
-    [6.754846200e-03, 1.090268098e-01, 9.940158584e-01],
+    [-8.897177208e-03, -1.102608088e-01, 9.938628649e-01],
+    [-6.084473231e-02, 4.654415203e-02, 9.970614627e-01],
+    [1.291614214e-03, 5.673367989e-02, 9.983885122e-01],
 ];
 
-/// Signed magnetic moments, A*m^2.
-pub const MAGNET_MOMENT: [f32; 3] = [9.056665190e-02, 8.612671110e-02, -8.279177083e-02];
+/// Signed magnetic moments, A*m^2. The sign is measured per device,
+/// not assumed; see `cadmouse.calibrate.detect_moment_signs`.
+pub const MAGNET_MOMENT: [f32; 3] = [7.011815328e-02, 6.784227595e-02, -6.585064653e-02];
 
-/// Per-sensor offset in counts, and per-axis gain.
+/// Per-sensor offset in counts.
 pub const SENSOR_OFFSET: [[f32; 3]; 3] = [
-    [1.713066610e+00, 5.654951926e-02, -2.057871041e+01],
-    [-7.780059116e-01, 8.555064901e+00, 8.437747736e+00],
-    [9.300081249e+00, -2.802426672e+00, 8.860293739e-01],
-];
-pub const SENSOR_GAIN: [[f32; 3]; 3] = [
-    [1.000000000e+00, 1.000000000e+00, 1.000000000e+00],
-    [1.000000000e+00, 1.000000000e+00, 1.000000000e+00],
-    [1.000000000e+00, 1.000000000e+00, 1.000000000e+00],
+    [4.964851444e-01, -3.620630219e+00, -7.194835821e+00],
+    [-1.999091096e+00, 5.037680617e+00, 1.614067304e+01],
+    [8.280261191e+00, -1.257176298e+00, -7.157232757e+00],
 ];

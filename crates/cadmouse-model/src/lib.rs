@@ -20,6 +20,7 @@ pub mod generated;
 pub mod magnet;
 pub mod model;
 pub mod rest;
+pub mod shaping;
 pub mod tuning;
 
 pub use magnet::FieldTable;

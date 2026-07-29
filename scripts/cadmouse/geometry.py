@@ -36,38 +36,41 @@ COUNTS_PER_MT = 7.7 * 2.0
 #: Raw counts are sign-extended 12-bit, so a reading here means the ADC railed.
 ADC_FULL_SCALE_COUNTS = 2047
 
-#: Sensor positions in the board frame, MAG1/2/3. Real pick-and-place
-#: coordinates: a 16.51 mm ring at z = -18 mm, ring angles -90 deg, 150 deg,
-#: 30 deg. MAG1 faces the user.
-SENSOR_POS = np.array(
-    [
-        [0.00, -16.51, -18.0],
-        [-14.30, 8.26, -18.0],
-        [14.30, 8.26, -18.0],
-    ]
-)
+#: Angular position of MAG1/2/3 around the ring, degrees in the board xy-plane
+#: measured from ``+x``. Shared by both rings, because each magnet sits directly
+#: above its own sensor -- that is a fact about the mechanism, so the two rings
+#: are given one set of angles rather than two that have to be kept equal by
+#: hand. MAG1 faces the user, and the other two are 120 deg either side of it.
+RING_ANGLES_DEG = np.array([-90.0, 150.0, 30.0])
 
-#: Nominal magnet ring: radius 16 mm, same angular positions as the sensors so
-#: each magnet sits directly above one sensor.
+
+def ring(radius: float, z: float, angles_deg: np.ndarray = RING_ANGLES_DEG) -> np.ndarray:
+    """``(3, 3)`` points on a horizontal ring, one row per angle."""
+    a = np.deg2rad(np.asarray(angles_deg, float))
+    return np.stack([radius * np.cos(a), radius * np.sin(a), np.full(a.size, z)], axis=1)
+
+
+#: Sensor ring: real pick-and-place coordinates, a 16.51 mm radius at
+#: z = -18 mm. Trusted, and the datum that pins the rigid-body gauge freedom.
+SENSOR_RING_RADIUS = 16.51
+SENSOR_RING_Z = -18.0
+
+#: Sensor positions in the board frame, MAG1/2/3.
+SENSOR_POS = ring(SENSOR_RING_RADIUS, SENSOR_RING_Z)
+
+#: Nominal magnet ring radius, 16 mm.
 MAGNET_RING_RADIUS = 16.0
-MAGNET_RING_ANGLES_DEG = np.array([-90.0, 150.0, 30.0])
 
-#: Two 6 x 3 mm discs stacked, so one 6 mm diameter by 6 mm tall cylinder. The
-#: lower face sits at z = -12 mm, putting the centre at z = -9 mm and leaving a
-#: 6 mm gap to the sensor plane.
+#: One 6 x 3 mm disc per position. The lower face sits at z = -12 mm, putting
+#: the centre at z = -10.5 mm and leaving a 7.5 mm gap to the sensor plane.
 MAGNET_DIAMETER = 6.0
-MAGNET_HEIGHT = 6.0
+MAGNET_HEIGHT = 3.0
 MAGNET_BOTTOM_Z = -12.0
 
-#: Nominal magnet centres in the knob body frame.
-MAGNET_POS = np.stack(
-    [
-        MAGNET_RING_RADIUS * np.cos(np.deg2rad(MAGNET_RING_ANGLES_DEG)),
-        MAGNET_RING_RADIUS * np.sin(np.deg2rad(MAGNET_RING_ANGLES_DEG)),
-        np.full(3, MAGNET_BOTTOM_Z + MAGNET_HEIGHT / 2.0),
-    ],
-    axis=1,
-)
+#: Nominal magnet centres in the knob body frame. Design values, and the block
+#: the fit is allowed to move -- the ring depth in particular was never
+#: measured.
+MAGNET_POS = ring(MAGNET_RING_RADIUS, MAGNET_BOTTOM_Z + MAGNET_HEIGHT / 2.0)
 
 #: Vacuum permeability, SI.
 MU0 = 4.0e-7 * np.pi
@@ -77,17 +80,21 @@ MU0 = 4.0e-7 * np.pi
 #: some 25 % weaker than this, with magnet 3 weaker still.
 BR_N35 = 1.17
 
-#: Nominal moment of one stacked pair at ``BR_N35``, in A*m^2.
+#: Nominal moment of one disc at ``BR_N35``, in A*m^2. Unsigned: which way a
+#: magnet is actually magnetised is a property of the assembled device, not of
+#: the design, so it is measured per device by
+#: :func:`~cadmouse.calibrate.detect_moment_signs` rather than written down
+#: here.
+#:
+#: That polarity is carried by the *moment*, which is therefore signed, rather
+#: than by flipping the magnetisation axis. Two reasons: it keeps the field
+#: linear in the moment, which the calibration's warm-up phase exploits, and it
+#: keeps every tilt angle small. It also belongs on the magnet rather than the
+#: sensor -- on this device magnet 3 is reversed, and that is not an assumption:
+#: correlating the model Jacobian per DOF against the first principal component
+#: of each motion segment scores 0.949 for a reversed magnet against 0.834 and
+#: 0.796 for the two ways sensor 3 could instead have been mounted upside down.
 MOMENT_N35 = BR_N35 / MU0 * (np.pi * (MAGNET_DIAMETER / 2e3) ** 2 * (MAGNET_HEIGHT / 1e3))
-
-#: Magnet 3 is physically reversed. This is not an assumption: correlating the
-#: model Jacobian per DOF against the first principal component of each motion
-#: segment scores 0.949 for a reversed magnet against 0.834 and 0.796 for the
-#: two ways sensor 3 could instead have been mounted upside down. The sign is
-#: carried by the magnet's *moment*, which is therefore signed, rather than by
-#: flipping its axis -- that keeps the field model linear in the moment, which
-#: the calibration's warm-up phase exploits.
-MOMENT_SIGN = np.array([1.0, 1.0, -1.0])
 
 
 def rotation_from_rotvec(rotvec: np.ndarray) -> np.ndarray:

@@ -71,17 +71,17 @@ def test_analytic_jacobian_matches_finite_differences(session, table):
         ],
         axis=1,
     )
-    x = np.concatenate([base[problem.param_mask], poses.ravel()])
+    x = np.concatenate([base, poses.ravel()])
 
-    analytic = jacobian(problem, base, table, x).toarray()
+    analytic = jacobian(problem, table, x).toarray()
     step = 1e-6
     for c in rng.choice(x.size, size=min(40, x.size), replace=False):
         hi, lo = x.copy(), x.copy()
         hi[c] += step
         lo[c] -= step
-        numeric = (
-            residual(problem, base, table, hi) - residual(problem, base, table, lo)
-        ) / (2 * step)
+        numeric = (residual(problem, table, hi) - residual(problem, table, lo)) / (
+            2 * step
+        )
         scale = max(1e-6, np.abs(analytic[:, c]).max())
         assert np.allclose(numeric, analytic[:, c], atol=2e-4 * scale, rtol=2e-4), (
             f"column {c} disagrees"

@@ -56,11 +56,13 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use embassy_usb::class::hid::{Config as HidConfig, HidWriter, State as HidState};
 use panic_probe as _;
 use static_cell::StaticCell;
 
 mod buttons;
 mod estimator;
+mod hid;
 mod led;
 mod protocol;
 mod sensors;
@@ -123,9 +125,19 @@ async fn main(spawner: Spawner) {
     // ── USB ──
     let driver = Driver::new(p.USB, UsbIrqs);
 
+    // pid.codes' community vendor ID with one of its test product IDs.
+    //
+    // Not 3Dconnexion's `256f:c631`, which the original C++ firmware claimed
+    // so that the vendor's driver would bind to it. On Linux nothing needs
+    // that: `spacenavd` will drive any device given its ID in `/etc/spnavrc`,
+    // so there is no reason to answer to another company's name.
+    //
+    // `1209:0001` is a *test* PID, fine for a personal build. A permanent one
+    // is free from pid.codes for an open-source project, which is the only
+    // condition attached to the VID.
     let config = {
-        let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
-        config.manufacturer = Some("CAD Mouse");
+        let mut config = embassy_usb::Config::new(0x1209, 0x0001);
+        config.manufacturer = Some("lr-net");
         config.product = Some("CAD Mouse MK2");
         config.serial_number = Some("00000001");
         config.max_power = 100;
@@ -161,7 +173,27 @@ async fn main(spawner: Spawner) {
         CdcAcmClass::new(&mut builder, state, 64)
     };
 
+    // The HID interface: what actually makes this a mouse. Declared after the
+    // CDC so the debug stream keeps its interface numbers; the composite is
+    // harmless to `spacenavd`, which binds to the HID interface and ignores
+    // the rest.
+    let hid_writer = {
+        static STATE: StaticCell<HidState> = StaticCell::new();
+        let state = STATE.init(HidState::new());
+        HidWriter::new(
+            &mut builder,
+            state,
+            HidConfig {
+                report_descriptor: hid::REPORT_DESCRIPTOR,
+                request_handler: None,
+                poll_ms: 1,
+                max_packet_size: hid::MAX_PACKET_SIZE as u16,
+            },
+        )
+    };
+
     unwrap!(spawner.spawn(usb_task(builder.build())));
+    unwrap!(spawner.spawn(hid::task(hid_writer)));
 
     // ── Core 1: the estimator ──
     // Started before the sensors so that the 87 kB flash-to-RAM copy of the

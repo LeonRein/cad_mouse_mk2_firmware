@@ -50,19 +50,27 @@ def test_radial_field_vanishes_on_axis():
     assert np.all(np.abs(b_rho) < 1e-12)
 
 
-def test_dipole_is_close_but_not_close_enough():
-    """A point dipole is far better here than the usual rule of thumb implies.
+def test_dipole_is_nowhere_near_good_enough():
+    """Why the finite-size table exists, in counts.
 
-    Length equal to twice the radius nearly cancels the leading multipole
-    correction, so the error at the operating gap is a couple of percent rather
-    than tens. That is still ~15 counts against a 1-count noise floor, which is
-    precisely why the table exists.
+    This used to record a *near miss*: with two discs stacked the magnet was as
+    long as it was wide, which nearly cancels the leading multipole correction
+    and left the dipole about 2 % out on axis. One disc is half as long as it is
+    wide, that cancellation is gone, and the dipole now overestimates by 18 % --
+    some 88 counts against a 1-count noise floor.
+
+    So the conclusion survived the magnet changing underneath it and the reason
+    did not, which is exactly the kind of thing worth pinning: if this ever
+    drops back to a couple of percent, someone has changed the magnet geometry.
     """
     z = 6.0 + MAGNET_HEIGHT / 2.0
     _, exact = magnet.field_axisym_exact(np.array(0.0), np.array(z))
     approx = magnet.field_dipole(np.array([0.0, 0.0, z]), np.array([0.0, 0.0, 1.0]))[2]
+
     error = abs(approx / exact - 1.0)
-    assert error < 0.05, "dipole should be within a few percent on axis"
+    assert 0.10 < error < 0.30, f"dipole error {error:.3f} on axis; magnet geometry changed?"
+    assert approx > exact, "a squat magnet's field falls off faster than a dipole's"
+
     counts = abs(approx - exact) * MOMENT_N35 * TESLA_TO_COUNTS
     assert counts > 5.0, "if the dipole were this good the table would be pointless"
 

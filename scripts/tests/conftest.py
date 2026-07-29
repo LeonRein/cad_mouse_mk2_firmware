@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cadmouse import build_table  # noqa: E402
+from cadmouse.calibrate import initial_params  # noqa: E402
 from cadmouse.dataset import load_session  # noqa: E402
 from cadmouse.params import CalibParams  # noqa: E402
 
@@ -28,7 +29,25 @@ def table():
 
 @pytest.fixture(scope="session")
 def nominal():
+    """Geometry from the drawing, with no device in the room.
+
+    Moments are all positive here, so this is the right fixture for the purely
+    mechanical checks -- Jacobians against finite differences, affine offsets,
+    observability -- and the wrong one for anything compared against a
+    recording. Use :func:`device_nominal` for those.
+    """
     return CalibParams.nominal()
+
+
+@pytest.fixture(scope="session")
+def device_nominal(session):
+    """The same geometry, carrying the polarity of the recorded device.
+
+    Which way each magnet points is measured, not designed, so a test that
+    compares the model against ``session1.csv`` has to take the signs from
+    ``session1.csv`` too. This is exactly what the fit starts from.
+    """
+    return initial_params(session)
 
 
 @pytest.fixture(scope="session")

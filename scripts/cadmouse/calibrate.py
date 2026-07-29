@@ -48,7 +48,7 @@ from .model import (
     pose_jacobian_batch,
     solve_pose,
 )
-from .params import CalibParams
+from .params import N_PARAMS, CalibParams
 
 #: Prior widths, one per block of :meth:`CalibParams.pack`. These are
 #: regularisers, not constraints: they keep the fit from wandering into
@@ -66,7 +66,6 @@ PRIOR_SIGMA = {
     "magnet_tilt": np.deg2rad(3.0),  # rad
     "magnet_moment": 0.5 * MOMENT_N35,  # A*m^2
     "sensor_offset": 46.0,  # counts, about 3 mT
-    "sensor_gain": 0.03,  # dimensionless
 }
 
 #: How far the knob is assumed to stray from the axis it was asked to move
@@ -138,10 +137,16 @@ def detect_moment_signs(session: Session) -> np.ndarray:
 
 
 def initial_params(session: Session) -> CalibParams:
-    """Nominal geometry, with the magnet polarities taken from the data."""
+    """Nominal geometry, with the magnet polarities taken from the data.
+
+    This is the only place polarity is decided. Nothing in ``geometry.py``
+    records which way a magnet points, because that is a property of the
+    assembled device rather than of the design: a knob built with magnet 3 the
+    other way up is a different device, not a broken one, and it calibrates
+    here without a source change.
+    """
     params = CalibParams.nominal()
-    signs = detect_moment_signs(session)
-    params.magnet_moment = np.abs(params.magnet_moment) * signs
+    params.magnet_moment = np.abs(params.magnet_moment) * detect_moment_signs(session)
     return params
 
 
@@ -160,9 +165,8 @@ class Problem:
     free_pose: np.ndarray  # (n,) bool -- rest frames are pinned at zero
     pose_slot: np.ndarray  # (n,) index into the pose block, -1 if pinned
     n_free: int
-    param_mask: np.ndarray  # (36,) bool
-    prior_centre: np.ndarray  # (36,)
-    prior_sigma: np.ndarray  # (36,)
+    prior_centre: np.ndarray  # (N_PARAMS,)
+    prior_sigma: np.ndarray  # (N_PARAMS,)
     smooth_pairs: np.ndarray  # (m, 2) indices of consecutive free frames
     smooth_sigma: np.ndarray  # (m, 6)
 
@@ -172,7 +176,7 @@ class Problem:
 
     @property
     def n_params(self) -> int:
-        return int(self.param_mask.sum())
+        return N_PARAMS
 
     @property
     def n_unknowns(self) -> int:
@@ -184,7 +188,6 @@ def build_problem(
     reference: CalibParams,
     per_segment: int = 400,
     per_rest_run: int = 150,
-    fit_gain: bool = False,
 ) -> Problem:
     """Decimate, and work out what is free, what is pinned and what is priored.
 
@@ -204,14 +207,12 @@ def build_problem(
     pose_slot = np.full(len(frames), -1, dtype=np.intp)
     pose_slot[free_pose] = np.arange(int(free_pose.sum()))
 
-    mask = CalibParams.free_mask(fit_gain=fit_gain)
     prior_sigma = np.concatenate(
         [
             np.tile(PRIOR_SIGMA["magnet_pos"], 3),
             np.full(6, PRIOR_SIGMA["magnet_tilt"]),
             np.full(3, PRIOR_SIGMA["magnet_moment"]),
             np.full(9, PRIOR_SIGMA["sensor_offset"]),
-            np.full(9, PRIOR_SIGMA["sensor_gain"]),
         ]
     )
 
@@ -235,7 +236,6 @@ def build_problem(
         free_pose=free_pose,
         pose_slot=pose_slot,
         n_free=int(free_pose.sum()),
-        param_mask=mask,
         prior_centre=reference.pack(),
         prior_sigma=prior_sigma,
         smooth_pairs=np.array(pairs, dtype=np.intp).reshape(-1, 2),
@@ -249,9 +249,8 @@ def _poses_from(problem: Problem, pose_block: np.ndarray) -> np.ndarray:
     return poses
 
 
-def _split(problem: Problem, x: np.ndarray, base: np.ndarray):
-    packed = base.copy()
-    packed[problem.param_mask] = x[: problem.n_params]
+def _split(problem: Problem, x: np.ndarray):
+    packed = x[: problem.n_params]
     params = CalibParams.unpack(packed)
     poses = _poses_from(problem, x[problem.n_params :])
     return params, poses, packed
@@ -262,8 +261,8 @@ def _split(problem: Problem, x: np.ndarray, base: np.ndarray):
 # --------------------------------------------------------------------------
 
 
-def _param_jacobian(ev, params: CalibParams, tesla: np.ndarray) -> np.ndarray:
-    """``d(counts)/d(calibration parameters)``, shape (n, 9, 36).
+def _param_jacobian(ev, params: CalibParams) -> np.ndarray:
+    """``d(counts)/d(calibration parameters)``, shape (n, 9, 27).
 
     All analytic. The field is evaluated at unit moment and scaled afterwards,
     which is what makes the moment column simply the unit field rather than
@@ -275,7 +274,7 @@ def _param_jacobian(ev, params: CalibParams, tesla: np.ndarray) -> np.ndarray:
     grad_delta = ev.grad_delta * moment
     grad_axis = ev.grad_axis * moment
 
-    out = np.zeros((n, 3, 3, 36))
+    out = np.zeros((n, 3, 3, N_PARAMS))
 
     # Magnet positions: delta = sensor - (R p + t), so d(delta)/dp = -R.
     for j in range(3):
@@ -295,23 +294,21 @@ def _param_jacobian(ev, params: CalibParams, tesla: np.ndarray) -> np.ndarray:
     out[:, :, :, 15:18] = np.transpose(ev.field, (0, 1, 3, 2))
 
     # Everything above is a field derivative and shares the output scaling.
-    out[:, :, :, 0:18] *= (params.sensor_gain * TESLA_TO_COUNTS)[None, :, :, None]
+    out[:, :, :, 0:18] *= TESLA_TO_COUNTS
 
-    # The sensor block does not: an offset adds straight onto its own channel,
-    # and a gain multiplies the field already on it.
+    # The offset block does not: it adds straight onto its own channel.
     channel = np.eye(MEAS_DIM).reshape(3, 3, MEAS_DIM)
     out[:, :, :, 18:27] = channel[None]
-    out[:, :, :, 27:36] = channel[None] * (tesla * TESLA_TO_COUNTS)[:, :, :, None]
-    return out.reshape(n, MEAS_DIM, 36)
+    return out.reshape(n, MEAS_DIM, N_PARAMS)
 
 
-def residual(problem: Problem, base: np.ndarray, table: FieldTable, x: np.ndarray):
-    params, poses, packed = _split(problem, x, base)
+def residual(problem: Problem, table: FieldTable, x: np.ndarray):
+    params, poses, packed = _split(problem, x)
 
     predicted = forward_batch(poses, params, table)
     measurement = ((problem.measurements - predicted) / problem.sigma).ravel()
 
-    prior = ((packed - problem.prior_centre) / problem.prior_sigma)[problem.param_mask]
+    prior = (packed - problem.prior_centre) / problem.prior_sigma
 
     free_poses = poses[problem.free_pose]
     axes = np.array([f.axis if f.axis is not None else -1 for f in problem.frames])[
@@ -332,14 +329,13 @@ def residual(problem: Problem, base: np.ndarray, table: FieldTable, x: np.ndarra
     return np.concatenate([measurement, prior, off_axis.ravel(), smooth])
 
 
-def jacobian(problem: Problem, base: np.ndarray, table: FieldTable, x: np.ndarray):
-    params, poses, _ = _split(problem, x, base)
+def jacobian(problem: Problem, table: FieldTable, x: np.ndarray):
+    params, poses, _ = _split(problem, x)
     n, p, f = problem.n_frames, problem.n_params, problem.n_free
 
     ev = evaluate_batch(poses, params, table)
-    tesla = (ev.field * params.magnet_moment[None, None, :, None]).sum(axis=2)
     d_pose = pose_jacobian_batch(ev, params, poses)  # (n, 9, 6)
-    d_param = _param_jacobian(ev, params, tesla)[:, :, problem.param_mask]  # (n, 9, p)
+    d_param = _param_jacobian(ev, params)  # (n, 9, p)
 
     inv_sigma = (1.0 / problem.sigma)[None, :, None]
     d_pose = -d_pose * inv_sigma
@@ -374,7 +370,7 @@ def jacobian(problem: Problem, base: np.ndarray, table: FieldTable, x: np.ndarra
     blocks.append([meas_param, meas_pose])
 
     # Prior rows: parameters only.
-    prior_diag = sparse.diags(1.0 / problem.prior_sigma[problem.param_mask])
+    prior_diag = sparse.diags(1.0 / problem.prior_sigma)
     blocks.append([prior_diag, sparse.csr_matrix((p, f * POSE_DIM))])
 
     # Off-axis rows: poses only, diagonal, with the commanded axis zeroed.
@@ -448,7 +444,7 @@ def refit_linear(
     """
     ev = evaluate_batch(poses, params, table, want_grad=False)
     n = problem.n_frames
-    unit = ev.field * TESLA_TO_COUNTS * params.sensor_gain[None, :, None, :]
+    unit = ev.field * TESLA_TO_COUNTS
 
     design = np.zeros((n * MEAS_DIM, 12))
     design[:, 0:3] = np.transpose(unit, (0, 1, 3, 2)).reshape(n * MEAS_DIM, 3)
@@ -566,7 +562,6 @@ def fit(
     table: FieldTable | None = None,
     per_segment: int = 400,
     per_rest_run: int = 150,
-    fit_gain: bool = False,
     max_nfev: int = 400,
     verbose: int = 1,
 ) -> CalibrationResult:
@@ -582,9 +577,7 @@ def fit(
     start = time.perf_counter()
 
     params = initial_params(session)
-    problem = build_problem(
-        session, params, per_segment, per_rest_run, fit_gain=fit_gain
-    )
+    problem = build_problem(session, params, per_segment, per_rest_run)
     if verbose:
         print(
             f"{problem.n_frames} frames "
@@ -598,18 +591,17 @@ def fit(
     if verbose:
         print(f"after warm-up: moments {np.array2string(params.magnet_moment, precision=4)}")
 
-    base = params.pack()
-    x0 = np.concatenate([base[problem.param_mask], poses[problem.free_pose].ravel()])
+    x0 = np.concatenate([params.pack(), poses[problem.free_pose].ravel()])
 
     # Without this the moments, which are ~0.05 in SI, would take steps
     # comparable to sensor offsets of tens of counts and be effectively frozen.
     pose_scale = np.tile([1.0, 1.0, 1.0, 0.05, 0.05, 0.05], problem.n_free)
-    x_scale = np.concatenate([CalibParams.scales()[problem.param_mask], pose_scale])
+    x_scale = np.concatenate([CalibParams.scales(), pose_scale])
 
     result = least_squares(
-        lambda x: residual(problem, base, table, x),
+        lambda x: residual(problem, table, x),
         x0,
-        jac=lambda x: jacobian(problem, base, table, x),
+        jac=lambda x: jacobian(problem, table, x),
         x_scale=x_scale,
         loss="soft_l1",
         f_scale=ROBUST_F_SCALE,
@@ -621,7 +613,7 @@ def fit(
         verbose=2 if verbose > 1 else 0,
     )
 
-    params, poses, _ = _split(problem, result.x, base)
+    params, poses, _ = _split(problem, result.x)
     seconds = time.perf_counter() - start
 
     scores = []
@@ -659,7 +651,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-o", "--output", type=Path, default=Path("calibration.json"))
     parser.add_argument("--per-segment", type=int, default=400)
     parser.add_argument("--per-rest-run", type=int, default=150)
-    parser.add_argument("--fit-gain", action="store_true")
     parser.add_argument("--max-nfev", type=int, default=400)
     parser.add_argument(
         "--force",
@@ -674,7 +665,6 @@ def main(argv: list[str] | None = None) -> int:
         session,
         per_segment=args.per_segment,
         per_rest_run=args.per_rest_run,
-        fit_gain=args.fit_gain,
         max_nfev=args.max_nfev,
         verbose=args.verbose,
     )

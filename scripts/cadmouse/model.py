@@ -93,7 +93,7 @@ def forward(pose: np.ndarray, params: CalibParams, table: FieldTable) -> np.ndar
     )
     field_by_sensor = b.sum(axis=1)  # (3 sensors, xyz), tesla
 
-    counts = params.sensor_gain * field_by_sensor * TESLA_TO_COUNTS
+    counts = field_by_sensor * TESLA_TO_COUNTS
     return (counts + params.sensor_offset).ravel()
 
 
@@ -129,9 +129,9 @@ def forward_and_jac(
         d_rotation += grad_delta[:, j] @ lever + grad_axis[:, j] @ spin
 
     jac = np.concatenate([d_translation, d_rotation], axis=2)  # (3, 3, 6)
-    jac = jac * (params.sensor_gain * TESLA_TO_COUNTS)[:, :, None]
+    jac = jac * TESLA_TO_COUNTS
 
-    counts = params.sensor_gain * field_by_sensor * TESLA_TO_COUNTS
+    counts = field_by_sensor * TESLA_TO_COUNTS
     return (counts + params.sensor_offset).ravel(), jac.reshape(MEAS_DIM, POSE_DIM)
 
 
@@ -193,7 +193,7 @@ def forward_batch(
     """Predicted counts for many poses at once, shape (n, 9)."""
     ev = evaluate_batch(poses, params, table, want_grad=False)
     tesla = (ev.field * params.magnet_moment[None, None, :, None]).sum(axis=2)
-    counts = params.sensor_gain[None] * tesla * TESLA_TO_COUNTS
+    counts = tesla * TESLA_TO_COUNTS
     return (counts + params.sensor_offset[None]).reshape(-1, MEAS_DIM)
 
 
@@ -226,7 +226,7 @@ def pose_jacobian_batch(
     d_rotation = np.einsum("nsoi,nik->nsok", d_rotation, right)
 
     jac = np.concatenate([d_translation, d_rotation], axis=3)
-    jac = jac * (params.sensor_gain * TESLA_TO_COUNTS)[None, :, :, None]
+    jac = jac * TESLA_TO_COUNTS
     return jac.reshape(-1, MEAS_DIM, POSE_DIM)
 
 
@@ -242,7 +242,7 @@ def forward_and_jac_vector(
     pose = np.asarray(pose, float).reshape(1, POSE_DIM)
     ev = evaluate_batch(pose, params, table)
     tesla = (ev.field * params.magnet_moment[None, None, :, None]).sum(axis=2)
-    counts = params.sensor_gain[None] * tesla * TESLA_TO_COUNTS + params.sensor_offset[None]
+    counts = tesla * TESLA_TO_COUNTS + params.sensor_offset[None]
     return counts.reshape(MEAS_DIM), pose_jacobian_batch(ev, params, pose)[0]
 
 

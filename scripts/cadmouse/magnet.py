@@ -76,7 +76,15 @@ def _disc_quadrature(radius_mm: float, n_radial: int, n_angular: int):
     return xy.reshape(-1, 2), area.reshape(-1)
 
 
-_QUAD_XY, _QUAD_AREA = _disc_quadrature(MAGNET_DIAMETER / 2.0, n_radial=8, n_angular=16)
+#: Face quadrature order. 8x16 was ample while the nearest tabulated point sat
+#: 3 mm from the magnet, and stopped being so when the magnet shrank to one
+#: disc: a shorter magnet puts its centre closer to the sensor, which drags the
+#: whole table towards the body, and the surface-charge integrand gets sharp as
+#: the observer approaches a face. At the current top of the z range 8x16 is
+#: worth 4.6 counts and 16x32 is exact to the float32 the table stores. The
+#: whole table builds in well under a second either way, so this is not a
+#: trade worth making finely.
+_QUAD_XY, _QUAD_AREA = _disc_quadrature(MAGNET_DIAMETER / 2.0, n_radial=16, n_angular=32)
 
 
 def field_axisym_exact(
@@ -161,8 +169,21 @@ def field_dipole(delta_mm: np.ndarray, axis: np.ndarray) -> np.ndarray:
 #: observer on the far side of the axis there, and by symmetry that is the odd
 #: continuation of B_rho and the even continuation of B_z, which is precisely
 #: what a stencil straddling the axis needs to see.
-DEFAULT_RHO_RANGE = (-1.0, 34.0)
-DEFAULT_Z_RANGE = (-22.0, -3.0)
+#: Both extents are tied to :data:`~cadmouse.geometry.MAGNET_HEIGHT`, which is
+#: easy to miss. The magnet's *bottom face* is what the mechanism fixes, so a
+#: shorter magnet puts its centre nearer the sensor plane -- going from a
+#: stacked pair to one disc moved it from 9 mm away to 7.5 mm, and moved the
+#: whole reachable ``z`` window 1.5 mm towards the top of the table.
+#:
+#: A query past an edge is *clamped*, not rejected, so getting this wrong does
+#: not raise: it silently returns the field from the edge of the table. That is
+#: cheap in rho, where only the two far magnets reach the boundary and they are
+#: worth ~10 counts, and expensive in z, where the clamped magnet is the near
+#: one sitting over its own sensor at ~500 counts. Over the envelope the tests
+#: probe, ``z`` reaches -2.75 and rho reaches 35.5; both ends carry a few grid
+#: cells of margin past that.
+DEFAULT_RHO_RANGE = (-1.0, 37.0)
+DEFAULT_Z_RANGE = (-22.0, -2.0)
 DEFAULT_SPACING = 0.25
 
 

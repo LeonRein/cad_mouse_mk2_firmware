@@ -37,7 +37,7 @@ def test_forward_and_jac_agrees_with_forward(table, nominal, envelope_poses):
         assert np.allclose(forward(pose, nominal, table), forward_and_jac(pose, nominal, table)[0])
 
 
-def test_offsets_and_gains_enter_affinely(table, nominal):
+def test_offsets_enter_additively(table, nominal):
     """The sensor block must be a pure output map, untouched by pose."""
     params = nominal.copy()
     params.sensor_offset = np.arange(9, dtype=float).reshape(3, 3)
@@ -45,10 +45,6 @@ def test_offsets_and_gains_enter_affinely(table, nominal):
     base = forward(pose, nominal, table)
     shifted = forward(pose, params, table)
     assert np.allclose(shifted - base, params.sensor_offset.ravel())
-
-    params = nominal.copy()
-    params.sensor_gain = np.full((3, 3), 2.0)
-    assert np.allclose(forward(pose, params, table), 2.0 * base)
 
 
 def test_cross_talk_is_not_negligible(table, nominal):
@@ -125,23 +121,32 @@ def test_pose_is_observable(table, nominal):
 # ---------------------------------------------------------------- vs. data
 
 
-def test_nominal_model_has_the_right_shape_but_the_wrong_size(table, nominal, session):
-    """Nominal geometry points the right way and is badly scaled.
+def test_nominal_model_points_the_right_way_and_is_close_in_size(table, device_nominal, session):
+    """Nominal geometry points the right way, and now scales about right too.
 
-    Both halves matter. The direction being right is what makes the fit
-    converge from this starting point; the magnitude being wrong by a quarter,
-    and by 40 % on the reversed third magnet, is what makes the fit necessary.
+    The direction being right is what makes the fit converge from this starting
+    point. The *magnitude* is the part that moved: while the drawing claimed two
+    stacked discs the nominal field was about twice the truth, every ratio
+    landing near 0.52. With one disc -- which is what the knob actually holds --
+    magnets 1 and 2 come out within a few percent.
+
+    Magnet 3 stays the outlier at ~0.83, and that is a real per-device fact
+    rather than a modelling error, which is why the fit still has moments to
+    find. Keep this gate tight: a ratio drifting back towards 0.5 means the
+    magnet geometry in ``geometry.py`` has stopped matching the hardware.
     """
     measured = session.rest_mean()
-    predicted = forward(np.zeros(POSE_DIM), nominal, table)
+    predicted = forward(np.zeros(POSE_DIM), device_nominal, table)
 
     cosine = float(measured @ predicted / (np.linalg.norm(measured) * np.linalg.norm(predicted)))
     assert cosine > 0.97, "nominal geometry should already point the right way"
 
     z_channels = [2, 5, 8]
     ratio = np.abs(measured[z_channels] / predicted[z_channels])
-    assert np.all(ratio < 0.9), "nominal magnets are stronger than the real ones"
-    assert ratio[2] < ratio[0] - 0.1, "magnet 3 is weaker still"
+    assert np.all((ratio > 0.75) & (ratio < 1.15)), (
+        f"nominal amplitude should be close, got {np.array2string(ratio, precision=3)}"
+    )
+    assert ratio[2] < ratio[0] - 0.1, "magnet 3 is weaker than the other two"
 
 
 def test_third_magnet_is_reversed(session):
@@ -183,18 +188,28 @@ EXPECTED_JACOBIAN_SIGNS = {
 }
 
 #: Below this a Jacobian entry carries no convention worth freezing. Chosen in
-#: the gap: the smallest asserted entry is 12.1, the largest ignored one 3.2.
-SIGN_THRESHOLD = 10.0
+#: the gap: the smallest asserted entry is 9.7, the largest ignored one 2.5.
+#:
+#: Was 10.0 while the drawing claimed two stacked discs. Halving the magnet
+#: halved the field and so halved every entry here, which left the two weakest
+#: asserted entries at 9.7 -- correct in sign, but no longer clearing a
+#: threshold set against a magnet twice as strong. **Every sign in the table
+#: above still matches**, so this is a rescaling, not a convention change; if a
+#: sign itself ever flips, do not touch either number, go and look at
+#: ``view.py``. The gap is still wide, and the failure this guards against
+#: stays caught: mirroring the magnet ring in z puts the magnets 27 mm from the
+#: sensors instead of 7.5, collapsing every entry by a factor of ~50.
+SIGN_THRESHOLD = 5.0
 
 
-def test_measurement_sign_convention_is_frozen(table, nominal):
+def test_measurement_sign_convention_is_frozen(table, device_nominal):
     """Freeze the hand-verified sign convention against silent mirroring.
 
     See :data:`EXPECTED_JACOBIAN_SIGNS`. If this fails, do not adjust the table
     to match the code -- go and look at `view.py` again, because either the
     convention really has changed or something has been mirrored.
     """
-    _, jac = forward_and_jac(np.zeros(POSE_DIM), nominal, table)
+    _, jac = forward_and_jac(np.zeros(POSE_DIM), device_nominal, table)
     per_unit = jac * np.array([1.0, 1.0, 1.0, *(np.deg2rad(1.0),) * 3])
 
     from cadmouse.geometry import CHANNEL_NAMES
@@ -240,7 +255,7 @@ def test_translation_moves_magnets_the_obvious_way(nominal):
 
 
 @pytest.mark.parametrize("segment", sorted(SEGMENT_AXIS))
-def test_measured_response_direction_matches_the_model(table, nominal, session, segment):
+def test_measured_response_direction_matches_the_model(table, device_nominal, session, segment):
     """Each motion segment moves the measurement along the axis the model says.
 
     Correlating the model's Jacobian column against the first principal
@@ -261,7 +276,7 @@ def test_measured_response_direction_matches_the_model(table, nominal, session, 
     centred = data - data.mean(axis=0)
     principal = np.linalg.svd(centred, full_matrices=False)[2][0]
 
-    _, jac = forward_and_jac(np.zeros(POSE_DIM), nominal, table)
+    _, jac = forward_and_jac(np.zeros(POSE_DIM), device_nominal, table)
     column = jac[:, SEGMENT_AXIS[segment]]
     cosine = abs(float(principal @ column / np.linalg.norm(column)))
     assert cosine > 0.85, f"{segment}: model and data disagree on direction ({cosine:.3f})"

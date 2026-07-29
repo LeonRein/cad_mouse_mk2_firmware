@@ -12,6 +12,7 @@ dependencies = [
     # the shipped filter: the RP2350 implementation is hand-written, so it
     # needs something independent to be checked against. See cadmouse/filter.py.
     "filterpy>=1.4.5",
+    "evdev>=1.9.3",
 ]
 
 [dependency-groups]

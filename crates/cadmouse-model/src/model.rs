@@ -168,8 +168,7 @@ pub fn forward(pose: &Pose, table: &FieldTable) -> [f32; MEAS_DIM] {
             }
         }
         for a in 0..3 {
-            out[3 * s + a] =
-                consts::SENSOR_GAIN[s][a] * tesla[a] * consts::TESLA_TO_COUNTS + consts::SENSOR_OFFSET[s][a];
+            out[3 * s + a] = tesla[a] * consts::TESLA_TO_COUNTS + consts::SENSOR_OFFSET[s][a];
         }
     }
     out
@@ -227,7 +226,7 @@ pub fn forward_and_jac(
         }
 
         for a in 0..3 {
-            let scale = consts::SENSOR_GAIN[s][a] * consts::TESLA_TO_COUNTS;
+            let scale = consts::TESLA_TO_COUNTS;
             counts[3 * s + a] = scale * tesla[a] + consts::SENSOR_OFFSET[s][a];
             for i in 0..3 {
                 jac[3 * s + a][i] = scale * d_trans[a][i];
