@@ -8,6 +8,10 @@ dependencies = [
     "scipy>=1.14",
     "pyserial>=3.5",
     "matplotlib>=3.9",
+    # Host-side only, and deliberately an *oracle* rather than a dependency of
+    # the shipped filter: the RP2350 implementation is hand-written, so it
+    # needs something independent to be checked against. See cadmouse/filter.py.
+    "filterpy>=1.4.5",
 ]
 
 [dependency-groups]
@@ -17,3 +21,7 @@ dev = ["pytest>=8.0"]
 # and the estimator is being rewritten from scratch.
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: runs a full calibration fit (tens of seconds)"]
