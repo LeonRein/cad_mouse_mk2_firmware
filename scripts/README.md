@@ -211,6 +211,108 @@ and that single frame lands up to 138 counts out. See `SETTLE_S` in
 So the way to close the remaining gap is a better model, not a bigger R — which
 puts the magnet-stack question above at the top of the list.
 
+## Watching it work
+
+```
+uv run view.py calibration.json                      # live, from the device
+uv run view.py calibration.json --replay data/session1.csv
+```
+
+A 3-D wireframe of the knob, six live traces, and a panel naming what the
+filter thinks you are doing ("tx +0.35 mm BACK"). The filter runs on every
+frame — it sustains ~2500 Hz in Python against the device's 2000 Hz — and only
+the drawing is decimated.
+
+This is not decoration. **Every automated check in this project is
+self-consistent**: held-out residual, NIS, innovation whiteness all compare the
+model against itself, so all of them pass just as happily if the board frame is
+mirrored or two axes are swapped. The one test tying segment labels to axes
+takes `abs()` of a cosine, confirming the response lies *along* the predicted
+axis but not which way it points. For a 3-D mouse that is the bug that ships,
+and a person moving the knob finds it in seconds.
+
+The conventions were confirmed by hand on 2026-07-29 and are now frozen in
+`test_model.py::EXPECTED_JACOBIAN_SIGNS`, which fails on mirroring the magnet
+ring in x or z, flipping any magnet's polarity, or permuting channels — all of
+which leave every residual- and consistency-based test in the suite green.
+
+The `abs()` on the segment-direction cosine stays, and is not the gap it looks
+like: the sign of a principal component is arbitrary, and the operator moved
+each axis both ways, so there is no direction in the recording to compare
+against. Even `tz` is 41 % positive. A person watching the screen is the only
+anchor to physical reality here, so the frozen table records what they saw.
+
+The 3-D view exaggerates motion (`--gain`, default 8x) because a millimetre on
+a 33 mm body is invisible; the traces are always in real units.
+
+The readout shows the filter rate and the display rate separately, because they
+are unrelated and a slow *picture* otherwise reads as a slow *filter*. Getting
+the picture usable took three changes, all found by profiling rather than
+guessing:
+
+| | ms/frame | fps |
+|---|---|---|
+| six autoscaled axes, 12 000 pts each, full redraw | 71.9 | 14 |
+| two fixed axes, 600 pts, full redraw | 66.0 | 15 |
+| the same, blitted | **20.3** | **49** |
+
+Most of it was never the data: six sets of axis furniture cost ~7 ms each to
+redraw whatever they contain, and autoscaling forces a full redraw every frame.
+Blitted, the 3-D wireframe costs 1.2 ms and the text readout is the single most
+expensive artist. Pass `--no-blit` if the blitted 3-D leaves artefacts on your
+backend.
+
+## Exporting to the firmware
+
+```
+uv run python -m cadmouse.export calibration.json
+```
+
+Writes `gen/field_table.bin` (85 kB of raw little-endian `f32`, pulled in with
+`include_bytes!`) and `src/generated.rs` (grid metadata, geometry, the fitted
+calibration). Both come from the same objects this package uses, so the
+firmware cannot drift away from what the calibration was fitted against.
+
+The Rust side lives in `src/magnet.rs` and `src/model.rs` — direct ports of
+`cadmouse/magnet.py` and `cadmouse/model.py`, and they have to stay direct
+ports or the golden vectors stop being a check of one function and become a
+comparison of two.
+
+To time it on target:
+
+```
+cargo run --bin bench_forward
+```
+
+Measured on the RP2350 at 150 MHz, `opt-level = 3`, against a 2 kHz budget of
+75 000 cycles:
+
+| | cycles | ns |
+|---|---|---|
+| `forward`, table in flash | 20 331 | 135 540 |
+| `forward`, table in RAM | **12 298** | 81 986 |
+| `forward_and_jac`, flash | 29 877 | 199 180 |
+| `forward_and_jac`, RAM | **20 383** | 135 886 |
+| one bicubic sample, RAM | 672 | 4 480 |
+
+What follows from it:
+
+- **Only the EKF family fits.** A six-state UKF needs 13 × 12 298 = 159 900
+  cycles, over twice the budget; twelve-state needs 307 000. An IEKF at one to
+  two iterations needs 20 400–40 800, i.e. 27–54 %. The earlier estimate of
+  ~3500 cycles per `h()` was 3.5–6x optimistic and had the six-state UKF
+  fitting — it does not.
+- **Copy the table into RAM.** It is worth 1.65x, and 85 kB against 520 kB of
+  SRAM is cheap. XIP cache misses dominate otherwise.
+- **The bicubic is about half the cost** — 9 × 672 = 6050 of 12 300 cycles —
+  so that is where any optimisation should start. `field_and_grad` is currently
+  not inlined (nine `bl` calls per `forward`), the index arithmetic carries
+  bounds checks, and `sqrtf` is a software call; all three are recoverable.
+
+The port is validated against the host in the same run: `forward(0)` returns
+`[8.120877, 24.266603, 510.744, …]` in f32 against `[8.1, 24.3, 510.7, …]` from
+f64 NumPy, and the flash and RAM tables agree to 0.0 counts.
+
 ## Not done here
 
 On-device Rust estimation; HID output; thermal drift

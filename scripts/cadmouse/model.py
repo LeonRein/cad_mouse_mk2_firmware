@@ -252,27 +252,71 @@ def solve_pose(
     table: FieldTable,
     initial: np.ndarray | None = None,
     sigma: np.ndarray | None = None,
-    iterations: int = 12,
+    iterations: int = 30,
     tol: float = 1e-9,
 ) -> tuple[np.ndarray, bool]:
-    """Gauss-Newton pose from one nine-channel frame.
+    """Levenberg-Marquardt pose from one nine-channel frame.
 
-    Nine measurements for six unknowns, and the problem is well conditioned --
-    the singular values of the Jacobian span only a factor of 2.5 over a
-    (1 mm, 5 deg) envelope -- so this converges in a handful of iterations from
-    the nominal pose. Used to initialise the bundle adjustment's latent poses,
-    and as the reference a filter's steady-state output should agree with.
+    Nine measurements for six unknowns, and locally the problem is beautifully
+    conditioned -- the Jacobian's singular values span a factor of 2.5. That
+    makes plain Gauss-Newton tempting, and it is a trap. Cold-started from pose
+    zero over the envelope the knob actually reaches (2.5 mm, 11 degrees,
+    measured by filtering the recorded free motion) undamped Gauss-Newton lands
+    in the wrong basin for about a third of poses, ending thousands of counts
+    away, and more iterations do not help: 134 of 200 converged at twelve
+    iterations and 136 at fifty.
+
+    Damping fixes it because the failure is a step-length problem, not an
+    iteration-count one. A 16.5 mm lever arm turns an over-long rotation step
+    into a large positional error, and the field the model then predicts has no
+    resemblance to the measurement.
+
+    Warm-started from a neighbouring frame -- which is what the calibration and
+    the filter both do -- either method works; this only matters cold.
 
     Returns the pose and whether it converged.
     """
     pose = np.zeros(POSE_DIM) if initial is None else np.asarray(initial, float).copy()
-    weight = 1.0 if sigma is None else 1.0 / np.asarray(sigma, float)
+    weight = np.ones(MEAS_DIM) if sigma is None else 1.0 / np.asarray(sigma, float)
+
+    def cost_at(x):
+        residual = (measurement - forward(x, params, table)) * weight
+        return float(residual @ residual)
+
+    cost = cost_at(pose)
+    damping = 1e-3
 
     for _ in range(iterations):
         predicted, jac = forward_and_jac(pose, params, table)
         residual = (measurement - predicted) * weight
-        step, *_ = np.linalg.lstsq(jac * np.atleast_1d(weight)[:, None], residual, rcond=None)
-        pose = perturb_pose(pose, step)
+        jac = jac * weight[:, None]
+        normal = jac.T @ jac
+        gradient = jac.T @ residual
+        scale = np.diag(np.maximum(np.diag(normal), 1e-12))
+
+        accepted = False
+        for _ in range(12):
+            try:
+                step = np.linalg.solve(normal + damping * scale, gradient)
+            except np.linalg.LinAlgError:
+                damping *= 10.0
+                continue
+            candidate = perturb_pose(pose, step)
+            candidate_cost = cost_at(candidate)
+            if candidate_cost < cost:
+                pose, cost = candidate, candidate_cost
+                damping = max(damping / 3.0, 1e-12)
+                accepted = True
+                break
+            damping *= 10.0
+            if damping > 1e12:
+                break
+
+        if not accepted:
+            # Damping has grown until the step is negligible; either converged
+            # or stuck, and the caller can tell from the residual either way.
+            return pose, cost < 4.0 * MEAS_DIM
         if np.linalg.norm(step) < tol:
             return pose, True
-    return pose, False
+
+    return pose, cost < 4.0 * MEAS_DIM

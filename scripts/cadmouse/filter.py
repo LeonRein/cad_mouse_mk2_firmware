@@ -91,7 +91,13 @@ class FilterConfig:
     #: NIS correlates with knob speed at r = 0.03, and at the measured peak of
     #: 19.5 mm/s the ~333 us of skew is worth under 1.5 counts.
     r_inflation: float = 1.0
-    iterations: int = 3  # IEKF only
+    #: IEKF relinearisation passes. Two, not because more was measured to help
+    #: -- one to five are indistinguishable on the held-out segment, 0.134 um
+    #: and 0.0005 deg apart, forty times below the noise floor -- but because
+    #: each costs a measured 20 400 cycles on target against a 75 000-cycle
+    #: budget, so the second is affordable insurance for transients that 20 s of
+    #: recorded motion may not contain. Drop to one if the budget tightens.
+    iterations: int = 2
 
     def process_noise(self, dt: float) -> np.ndarray:
         return np.diag([self.q_pos * dt] * 3 + [self.q_rot * dt] * 3)

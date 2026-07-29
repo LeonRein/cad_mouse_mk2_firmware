@@ -25,7 +25,13 @@ Held fixed, and why:
 * Sensor gain, by default -- the datasheet's gain tolerance is far tighter than
   the magnet's remanence spread, so letting both float would only feed the
   global scale degeneracy (scale every moment by ``a``, every gain by ``1/a``,
-  and no measurement changes). Enable it only if residuals demand it.
+  and no measurement changes).
+
+  This was tried, and it overfits: enabling the nine gains moves the held-out
+  residual the wrong way, 0.886 to 1.001 counts, while the gains themselves
+  wander 6-16 % from unity -- far outside anything the part could plausibly do.
+  Nine free parameters buying a worse prediction is the textbook signature, so
+  the default stays off.
 """
 
 from __future__ import annotations

@@ -42,10 +42,14 @@ def session():
 def envelope_poses():
     """Poses spanning what the mechanism actually reaches.
 
-    Derived from the recorded spans divided by the model's sensitivity: about
-    +-1.2 mm of travel and +-4 deg of tilt.
+    Measured, not assumed: filtering the ``free`` segment gives peaks of 1.24,
+    2.47 and 0.84 mm and 7.6, 8.5 and 10.2 degrees. An earlier guess of
+    +-1.2 mm and +-4 deg was inferred from segment spans divided by the model's
+    sensitivity, and it under-tested the rotations by more than a factor of
+    two -- so the accuracy gates were being checked over a smaller envelope
+    than the device actually visits.
     """
     rng = np.random.default_rng(20260729)
-    translations = rng.uniform(-1.2, 1.2, size=(200, 3))
-    rotations = np.deg2rad(rng.uniform(-4.0, 4.0, size=(200, 3)))
+    translations = rng.uniform(-2.5, 2.5, size=(200, 3))
+    rotations = np.deg2rad(rng.uniform(-11.0, 11.0, size=(200, 3)))
     return np.concatenate([translations, rotations], axis=1)

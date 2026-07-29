@@ -93,7 +93,7 @@ def test_table_reproduces_the_exact_field(table):
     """
     rng = np.random.default_rng(7)
     rho = rng.uniform(0.0, 30.0, size=20000)
-    z = rng.uniform(-13.0, -6.0, size=20000)
+    z = rng.uniform(-13.5, -5.0, size=20000)
 
     exact_rho, exact_z = magnet.field_axisym_exact(rho, z)
     got_rho, got_z, *_ = magnet.sample(table, rho, z)
@@ -110,7 +110,7 @@ def test_table_is_accurate_on_the_axis(table):
     Called out separately because it is the one place a plausible-looking
     boundary clamp does real damage, and a uniformly sampled test can miss it.
     """
-    z = np.linspace(-13.0, -6.0, 200)
+    z = np.linspace(-13.5, -5.0, 200)
     rho = np.zeros_like(z)
     exact_rho, exact_z = magnet.field_axisym_exact(rho, z)
     got_rho, got_z, *_ = magnet.sample(table, rho, z)

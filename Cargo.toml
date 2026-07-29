@@ -5,8 +5,24 @@ version = "0.1.0"
 authors = ["Your Name <you@example.com>"]
 resolver = "2"
 
+[lib]
+name = "cad_mouse_mk2_firmware"
+path = "src/lib.rs"
+test = false
+bench = false
+
 [[bin]]
 name = "cad-mouse-mk2-firmware"
+path = "src/main.rs"
+test = false
+bench = false
+
+# Cycle-counts the measurement function on target; see its module docs.
+#   cargo run --bin bench_forward
+#   cargo run --profile release-fast --bin bench_forward
+[[bin]]
+name = "bench_forward"
+path = "src/bin/bench_forward.rs"
 test = false
 bench = false
 
@@ -33,12 +49,17 @@ static_cell = "2.1.1"
 tli493d = { path = "../tli493d", features = ["defmt"] }
 embassy-embedded-hal = "0.6.0"
 smart-leds = "0.4.0"
+libm = "0.2"
+
+# Speed, not size. The estimator has a hard 2 kHz deadline and 'z' suppresses
+# exactly the inlining and unrolling a bicubic interpolation depends on, while
+# the part has 2 MB of flash and nothing here is close to filling it.
 [profile.release]
 debug = 2
 lto = true
-opt-level = 'z'
+opt-level = 3
 
 [profile.dev]
 debug = 2
 lto = true
-opt-level = "z"
+opt-level = 3

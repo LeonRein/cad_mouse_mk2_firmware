@@ -2,6 +2,12 @@
 runner = "probe-rs run --chip RP235x"
 [build]
 target = "thumbv8m.main-none-eabihf"
+# Do NOT add `-C target-feature=+vfp2` here to unlock the `sreg` inline-asm
+# register class. VFP2 implies *double*-precision hardware and this core's FPU
+# is FPv5-SP, single-precision only. With the flag set, LLVM emits `.f64`
+# instructions inside `libm::sinf` and the board takes an undefined-instruction
+# UsageFault on the first rotation. `libm::sqrtf` already lowers to the
+# hardware VSQRT.F32, so there was nothing to win.
 
 [env]
 DEFMT_LOG = "info"
