@@ -1,0 +1,20 @@
+[package]
+name = "iekf"
+version = "0.1.0"
+edition = "2024"
+description = "Allocation-free iterated extended Kalman filter for embedded targets"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The only dependency, and only for `sqrtf` in the Cholesky factorisation:
+# `core` still has no `f32::sqrt`. Kept deliberately at one so the crate is
+# usable from any `no_std` project without dragging a matrix library along.
+libm = "0.2"
+
+[features]
+default = []
+defmt = ["dep:defmt"]
+
+[dependencies.defmt]
+version = "1.0"
+optional = true

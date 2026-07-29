@@ -26,8 +26,8 @@ from .magnet import FieldTable, build_table
 from .params import CalibParams
 
 #: Where the firmware expects to find them, relative to the repository root.
-DEFAULT_BLOB = Path("gen/field_table.bin")
-DEFAULT_RUST = Path("src/generated.rs")
+DEFAULT_BLOB = Path("crates/cadmouse-model/gen/field_table.bin")
+DEFAULT_RUST = Path("crates/cadmouse-model/src/generated.rs")
 
 
 def write_blob(table: FieldTable, path: Path) -> int:
@@ -63,8 +63,8 @@ def write_rust(table: FieldTable, params: CalibParams, blob_bytes: int, path: Pa
         "//! Regenerate with:",
         "//!     cd scripts && uv run python -m cadmouse.export calibration.json",
         "//!",
-        "//! The field table itself lives in `gen/field_table.bin`; these are the",
-        "//! constants needed to index it and the calibration it was fitted with.",
+        "//! The field table itself lives in `../gen/field_table.bin`; these are",
+        "//! the constants needed to index it and the calibration it was fitted with.",
         "",
         "/// Bytes in `gen/field_table.bin`, checked against the include at compile time.",
         f"pub const TABLE_BYTES: usize = {blob_bytes};",

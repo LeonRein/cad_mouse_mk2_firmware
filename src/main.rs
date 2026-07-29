@@ -1,29 +1,72 @@
+//! CAD Mouse MK2 firmware: bring-up, wiring, and the sensor readout loop.
+//!
+//! This file is deliberately thin. It knows the pin numbers and the order
+//! things have to start in, and nothing else -- every behaviour lives in a
+//! module that can be read on its own:
+//!
+//! | module            | owns                                              |
+//! |-------------------|---------------------------------------------------|
+//! | [`sensors`]       | the three TLI493D sensors on the shared I2C bus   |
+//! | [`estimator`]     | the pose filter, on core 1, and the core boundary |
+//! | [`led`]           | the ring; anything may ask it for a pattern       |
+//! | [`buttons`]       | debouncing, and the hold-to-calibrate gesture     |
+//! | [`protocol`]      | the debug frame the host decodes                  |
+//!
+//! The rest calibration itself is in `cadmouse-model`, with the rest of the
+//! estimation code, so it can be tested on the host.
+//!
+//! # Board
+//!
+//! Seeed XIAO RP2350. The D-pin numbering below is the board's silkscreen; the
+//! GPIO numbers are what the code uses.
+//!
+//! | function          | pin | GPIO |
+//! |-------------------|-----|------|
+//! | right button      | D0  | 26   |
+//! | LED level shifter | D1  | 27   |
+//! | left button       | D2  | 28   |
+//! | LED data          | D3  | 5    |
+//! | I2C1 SDA          | D4  | 6    |
+//! | I2C1 SCL          | D5  | 7    |
+//! | MAG3 power        | D8  | 2    |
+//! | MAG2 power        | D9  | 4    |
+//! | MAG1 power        | D10 | 3    |
+//!
+//! D3 is GPIO5 here and GPIO29 on the XIAO RP2040 that the original C firmware
+//! targeted. Every other D-pin maps identically between the two boards, which
+//! makes this the one entry in the table worth double-checking.
+
 #![no_std]
 #![no_main]
 
+use core::ptr::addr_of_mut;
+
 use defmt::{info, unwrap, warn};
-use embassy_executor::Spawner;
+use defmt_rtt as _;
+use embassy_executor::{Executor, Spawner};
 use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Level, Output};
+use embassy_rp::gpio::{Level, Output, Pull};
 use embassy_rp::i2c::{Config as I2cConfig, I2c, InterruptHandler};
+use embassy_rp::multicore::{Stack, spawn_core1};
 use embassy_rp::peripherals::{PIO0, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Instant, with_timeout};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
-use smart_leds::RGB8;
+use panic_probe as _;
 use static_cell::StaticCell;
-use defmt_rtt as _;
-use {panic_probe as _};
 
+mod buttons;
+mod estimator;
+mod led;
+mod protocol;
 mod sensors;
 
-/// LED ring on the CAD Mouse MK2: 8 WS2812 pixels (see original_firmware
-/// `Config::LED_COUNT`).
-const LED_COUNT: usize = 8;
+use led::{LED_COUNT, Pattern};
+use protocol::{FRAME_LEN, Frame};
 
 bind_interrupts!(struct UsbIrqs {
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
@@ -40,28 +83,44 @@ bind_interrupts!(struct PioIrqs {
 type MyUsbDriver = Driver<'static, USB>;
 type MyUsbDevice = UsbDevice<'static, MyUsbDriver>;
 
+/// Stack for core 1.
+///
+/// The estimator's working set is a few hundred bytes of matrices -- the
+/// 87 kB field table is a `static`, not a local -- so this is generous.
+static mut CORE1_STACK: Stack<8192> = Stack::new();
+static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
+
+/// Longest a single debug frame may spend waiting for the host.
+///
+/// The readout loop must not be hostage to whatever is on the other end of the
+/// USB cable. A host that opens the port and then stops reading would
+/// otherwise stall the sensor loop, and with it the estimator -- so a frame
+/// the host will not take is dropped, and the gap shows up in `seq`.
+const USB_WRITE_TIMEOUT: Duration = Duration::from_millis(10);
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
-    // LED ring: 8x WS2812 on D3/GPIO5 (data, driven via PIO) with a level
-    // shifter enable on D1/GPIO27. Blinks continuously from boot as a
-    // hardware-alive indicator, independent of USB/sensor state.
-    //
-    // Note: D3 is GPIO5 on the XIAO RP2350, *not* GPIO29 like on the XIAO
-    // RP2040 the original C firmware's pin table was written for — the two
-    // boards share the same D-to-GPIO mapping everywhere else (D1, D4, D5,
-    // D8, D9, D10 are all identical), but D3 was remapped on the RP2350.
-    let led_ls = Output::new(p.PIN_27, Level::High);
+    // ── LED ring ──
+    // Started first, so that everything after this point has a way to say what
+    // it is doing. White while booting.
+    let led_level_shifter = Output::new(p.PIN_27, Level::High);
     let Pio {
         mut common, sm0, ..
     } = Pio::new(p.PIO0, PioIrqs);
     let ws2812_program = PioWs2812Program::new(&mut common);
     let ws2812: PioWs2812<'_, PIO0, 0, LED_COUNT, Grb> =
         PioWs2812::new(&mut common, sm0, p.DMA_CH0, p.PIN_5, &ws2812_program);
-    unwrap!(spawner.spawn(led_task(led_ls, ws2812)));
+    unwrap!(spawner.spawn(led::task(led_level_shifter, ws2812)));
+    led::set(Pattern::Solid(led::WHITE));
 
-    // ── USB setup ──
+    // ── Buttons ──
+    let right = embassy_rp::gpio::Input::new(p.PIN_26, Pull::Up);
+    let left = embassy_rp::gpio::Input::new(p.PIN_28, Pull::Up);
+    unwrap!(spawner.spawn(buttons::task(left, right)));
+
+    // ── USB ──
     let driver = Driver::new(p.USB, UsbIrqs);
 
     let config = {
@@ -92,41 +151,51 @@ async fn main(spawner: Spawner) {
         )
     };
 
-    // CDC ACM for raw sensor data
+    // CDC ACM carrying the debug stream: raw counts and the pose built from
+    // them. This is what `scripts/record.py` and `scripts/view.py` read, and
+    // it stays even once HID exists -- a session recorded through it can be
+    // re-filtered on the host with different tuning.
     let mut data_class = {
         static STATE: StaticCell<State> = StaticCell::new();
         let state = STATE.init(State::new());
         CdcAcmClass::new(&mut builder, state, 64)
     };
 
-    let usb = builder.build();
+    unwrap!(spawner.spawn(usb_task(builder.build())));
 
-    // Background tasks
-    unwrap!(spawner.spawn(usb_task(usb)));
+    // ── Core 1: the estimator ──
+    // Started before the sensors so that the 87 kB flash-to-RAM copy of the
+    // field table overlaps with sensor bring-up rather than following it.
+    spawn_core1(
+        p.CORE1,
+        // SAFETY: taken once, and core 1 is spawned exactly once.
+        unsafe { &mut *addr_of_mut!(CORE1_STACK) },
+        move || {
+            let executor = EXECUTOR1.init(Executor::new());
+            executor.run(|spawner| unwrap!(spawner.spawn(estimator::task())));
+        },
+    );
 
-    // ── Wait for USB enumeration ──
-    embassy_time::Timer::after_millis(1500).await;
+    Timer::after_millis(1500).await;
     info!("Hello — defmt online");
 
-    // ── Sensor init with 3 s timeout ──
+    // ── Sensors ──
     info!("Initializing sensors…");
 
-    // Configure I2C bus and power outputs (only main.rs knows the pins).
     let i2c_cfg = {
         let mut c = I2cConfig::default();
         c.frequency = 1_000_000;
         c
     };
-    // XIAO RP2350: I2C1 on D5 = GPIO7 (SCL) and D4 = GPIO6 (SDA).
-    // new_async takes (peripheral, scl, sda, ...).
+    // `new_async` takes (peripheral, scl, sda, ...).
     let i2c = I2c::new_async(p.I2C1, p.PIN_7, p.PIN_6, I2cIrqs, i2c_cfg);
 
-    // Per-sensor supply switches: D10 = GPIO3 (MAG1), D9 = GPIO4 (MAG2), D8 = GPIO2 (MAG3).
     let mag1_pwr = Output::new(p.PIN_3, Level::Low);
     let mag2_pwr = Output::new(p.PIN_4, Level::Low);
     let mag3_pwr = Output::new(p.PIN_2, Level::Low);
 
-    static I2C_BUS: StaticCell<sensors::SharedBus<embassy_rp::peripherals::I2C1>> = StaticCell::new();
+    static I2C_BUS: StaticCell<sensors::SharedBus<embassy_rp::peripherals::I2C1>> =
+        StaticCell::new();
     let bus = I2C_BUS.init(Mutex::new(i2c));
 
     let sensors_init = with_timeout(
@@ -136,126 +205,119 @@ async fn main(spawner: Spawner) {
     .await;
 
     let mut sensors = match sensors_init {
-        Ok(Ok(s)) => {
-            info!("Sensors ready");
-            Some(s)
-        }
+        Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             warn!("Sensor init error: {}", defmt::Debug2Format(&e));
-            None
+            fault().await
         }
         Err(_) => {
             warn!("Sensor init timed out");
-            None
+            fault().await
         }
     };
 
-    // ── Main loop: stream sensor data over data CDC ──
+    // ── Readout ──
+    //
+    // Deliberately unpaced. Reads block on clock stretching until the sensor
+    // has converted, so the loop already self-clocks at the rate the hardware
+    // sustains. A device-side timer here would be a second clock beating
+    // against it, and `Ticker` compounds that by never re-syncing to `now`, so
+    // any stall is repaid as an unpaced burst of back-to-back samples that
+    // breaks the uniform sampling the estimator assumes.
+    //
+    // `seq` counts every attempted sample, successful or not, so a gap in the
+    // host's log unambiguously means a lost frame.
+    let mut seq: u16 = 0;
+    let mut errors: u32 = 0;
+    let mut sent: u32 = 0;
+    let mut window_start = Instant::now();
+    let mut window_samples: u32 = 0;
+
     loop {
-        data_class.wait_connection().await;
-        info!("Data CDC connected");
-
-        match sensors {
-            Some(ref mut s) => {
-                // Deliberately unpaced. Reads block on clock stretching until the
-                // sensor has converted, so the loop already self-clocks at the
-                // rate the hardware sustains, and `write_packet` bounds the USB
-                // side. A device-side timer here would be a second clock beating
-                // against the USB host's, which owns the only 1 kHz that matters
-                // — and `Ticker` compounds that by never re-syncing to `now`, so
-                // any stall is repaid as an unpaced burst of back-to-back samples
-                // that breaks the uniform sampling downstream estimation assumes.
-                //
-                // Counts every attempted sample, successful or not, so that a
-                // gap in the host's log unambiguously means a lost frame.
-                let mut seq: u16 = 0;
-                let mut errors: u32 = 0;
-                let mut sent: u32 = 0;
-                let mut window_start = Instant::now();
-                let mut window_sent: u32 = 0;
-                loop {
-                    let raw = match s.read_raw().await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            // Under master-controlled triggering a read that
-                            // yields nothing is a genuine fault, not the routine
-                            // "sensor hasn't converted yet" that the old
-                            // free-running configuration produced constantly.
-                            // Log the first, then sample, so a persistent fault
-                            // is visible without flooding the transport.
-                            errors += 1;
-                            if errors == 1 || errors % 256 == 0 {
-                                warn!("read error #{} (sent {}): {}", errors, sent, e);
-                            }
-                            seq = seq.wrapping_add(1);
-                            // Back off only on the error path. A failing read can
-                            // return in microseconds (a NACK from a sensor that
-                            // lost power, say), and without this the loop would
-                            // spin on the bus and starve the USB task.
-                            embassy_time::Timer::after_millis(1).await;
-                            continue;
-                        }
-                    };
-                    let t_us = Instant::now().as_micros() as u32;
-                    let mut buf = [0u8; sensors::FRAME_LEN];
-                    sensors::format_frame(seq, t_us, &raw, &mut buf);
-                    if data_class.write_packet(&buf).await.is_err() {
-                        break;
-                    }
-                    seq = seq.wrapping_add(1);
-                    sent += 1;
-                    window_sent += 1;
-
-                    // Report achieved rate independently of the host, so the
-                    // readout strategy can be judged without trusting record.py.
-                    let elapsed = window_start.elapsed();
-                    if elapsed >= Duration::from_secs(5) {
-                        let hz = window_sent * 1000 / elapsed.as_millis() as u32;
-                        info!(
-                            "stream: {} Hz, {} sent, {} errors, DIAG={:02x}",
-                            hz,
-                            sent,
-                            errors,
-                            s.diag_bytes()
-                        );
-                        window_start = Instant::now();
-                        window_sent = 0;
-                    }
+        let counts = match sensors.read_raw().await {
+            Ok(r) => r,
+            Err(e) => {
+                // Under master-controlled triggering a read that yields
+                // nothing is a genuine fault, not the routine "sensor hasn't
+                // converted yet" that the old free-running configuration
+                // produced constantly. Log the first, then sample, so a
+                // persistent fault is visible without flooding the transport.
+                errors += 1;
+                if errors == 1 || errors % 256 == 0 {
+                    warn!("read error #{} (sent {}): {}", errors, sent, e);
                 }
+                seq = seq.wrapping_add(1);
+                // Back off only on the error path: a failing read can return
+                // in microseconds, and without this the loop would spin on the
+                // bus and starve everything else.
+                Timer::after_millis(1).await;
+                continue;
             }
-            None => {
-                info!("No sensors — data CDC idle");
-                // Sleep so we don't busy-loop; host disconnect will
-                // naturally reset us to wait_connection on next iteration.
-                embassy_time::Timer::after_secs(1).await;
+        };
+
+        let t_us = Instant::now().as_micros() as u32;
+        estimator::submit(estimator::Sample { seq, t_us, counts });
+
+        // Whatever core 1 has made of the recent past. Not necessarily this
+        // sample -- see `estimator` on why that is the intended behaviour.
+        let estimate = estimator::latest();
+        let frame = Frame {
+            seq,
+            t_us,
+            counts,
+            pose: estimate.map(|e| e.pose).unwrap_or_default(),
+            nis: estimate.map(|e| e.nis).unwrap_or_default(),
+            status: estimate.map(|e| e.status).unwrap_or_default(),
+            progress: estimate.map(|e| e.progress).unwrap_or_default(),
+        };
+
+        if data_class.dtr() {
+            let mut buf = [0u8; FRAME_LEN];
+            frame.encode(&mut buf);
+            match with_timeout(USB_WRITE_TIMEOUT, data_class.write_packet(&buf)).await {
+                Ok(Ok(())) => sent += 1,
+                Ok(Err(_)) => {} // host went away; keep sampling
+                Err(_) => {}     // host stopped reading; drop the frame
             }
         }
 
-        info!("Data CDC disconnected");
+        seq = seq.wrapping_add(1);
+        window_samples += 1;
+
+        // Report the achieved rate independently of the host, so the readout
+        // can be judged without trusting record.py.
+        let elapsed = window_start.elapsed();
+        if elapsed >= Duration::from_secs(5) {
+            let hz = window_samples * 1000 / elapsed.as_millis() as u32;
+            let stale = estimate
+                .map(|e| seq.wrapping_sub(e.seq))
+                .unwrap_or(u16::MAX);
+            info!(
+                "stream: {} Hz, {} sent, {} errors, estimator {} frames behind, DIAG={:02x}",
+                hz,
+                sent,
+                errors,
+                stale,
+                sensors.diag_bytes()
+            );
+            window_start = Instant::now();
+            window_samples = 0;
+        }
     }
 }
 
-// ── Background tasks ──
+/// Nothing useful can happen without sensors, so say so and stop.
+///
+/// A solid red ring rather than a silent hang: the one thing worse than a dead
+/// device is a dead device that looks like a working one.
+async fn fault() -> ! {
+    led::set(Pattern::Solid(led::RED));
+    loop {
+        Timer::after_secs(60).await;
+    }
+}
 
 #[embassy_executor::task]
 async fn usb_task(mut usb: MyUsbDevice) -> ! {
     usb.run().await
-}
-
-/// Blinks the whole LED ring dim green as a hardware-alive heartbeat.
-/// `_led_ls` is held for the task's lifetime so the level-shifter enable
-/// pin stays driven high (dropping it would float the pin).
-#[embassy_executor::task]
-async fn led_task(_led_ls: Output<'static>, mut ws2812: PioWs2812<'static, PIO0, 0, LED_COUNT, Grb>) -> ! {
-    info!("LED task started");
-    let on = [RGB8::new(0, 20, 0); LED_COUNT];
-    let off = [RGB8::default(); LED_COUNT];
-    loop {
-        ws2812.write(&on).await;
-        // info!("LED on");
-        embassy_time::Timer::after_millis(300).await;
-        ws2812.write(&off).await;
-        // info!("LED off");
-        embassy_time::Timer::after_millis(300).await;
-    }
 }

@@ -3,8 +3,8 @@
 //! Regenerate with:
 //!     cd scripts && uv run python -m cadmouse.export calibration.json
 //!
-//! The field table itself lives in `gen/field_table.bin`; these are the
-//! constants needed to index it and the calibration it was fitted with.
+//! The field table itself lives in `../gen/field_table.bin`; these are
+//! the constants needed to index it and the calibration it was fitted with.
 
 /// Bytes in `gen/field_table.bin`, checked against the include at compile time.
 pub const TABLE_BYTES: usize = 86856;

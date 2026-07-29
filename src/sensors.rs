@@ -269,45 +269,6 @@ async fn scan_bus<T: I2cInstance + 'static>(bus: &'static SharedBus<T>) {
     }
 }
 
-/// Sync word starting every frame, little-endian on the wire.
-///
-/// The host needs a way to resynchronise: USB CDC is a byte stream with no
-/// record boundaries, so a reader that attaches mid-frame has to find the start
-/// of the next one.
-pub const FRAME_MAGIC: u16 = 0xA55A;
-
-/// Wire size of one sample frame.
-///
-/// Deliberately under the 64-byte USB full-speed bulk packet limit so a frame is
-/// always exactly one `write_packet` -- no fragmentation, no zero-length-packet
-/// handling on either side.
-pub const FRAME_LEN: usize = 26;
-
-/// Serialize one sample as a fixed-size binary frame.
-///
-/// Layout, all little-endian:
-///
-/// | offset | size | field                                    |
-/// |--------|------|------------------------------------------|
-/// | 0      | 2    | [`FRAME_MAGIC`]                          |
-/// | 2      | 2    | `seq`, wrapping frame counter            |
-/// | 4      | 4    | `t_us`, device uptime in microseconds    |
-/// | 8      | 18   | nine `i16` raw counts, MAG1/2/3 x,y,z    |
-///
-/// Binary rather than the CSV this replaced: a worst-case CSV line plus the new
-/// fields would have exceeded the 64-byte packet and been silently truncated,
-/// and formatting nine integers per sample at ~770 Hz is real work for no gain.
-///
-/// `seq` increments on *every* attempted read, including ones that failed, so a
-/// gap in the host's log means precisely "a sample was lost" rather than "the
-/// hand stopped moving". Without it, dropped frames are invisible and any
-/// velocity estimate derived from the stream is quietly wrong.
-pub fn format_frame(seq: u16, t_us: u32, raw: &[i16; 9], buf: &mut [u8; FRAME_LEN]) {
-    buf[0..2].copy_from_slice(&FRAME_MAGIC.to_le_bytes());
-    buf[2..4].copy_from_slice(&seq.to_le_bytes());
-    buf[4..8].copy_from_slice(&t_us.to_le_bytes());
-    for (i, &v) in raw.iter().enumerate() {
-        let at = 8 + i * 2;
-        buf[at..at + 2].copy_from_slice(&v.to_le_bytes());
-    }
-}
+// The wire format that used to live here is now in `protocol.rs`: it is a
+// contract with the host tooling rather than a property of the sensors, and it
+// grew fields the sensors know nothing about.

@@ -5,11 +5,18 @@ version = "0.1.0"
 authors = ["Your Name <you@example.com>"]
 resolver = "2"
 
-[lib]
-name = "cad_mouse_mk2_firmware"
-path = "src/lib.rs"
-test = false
-bench = false
+# Two library crates, split along the line of what is reusable:
+#
+#   crates/iekf            general-purpose filter, knows nothing about magnets
+#   crates/cadmouse-model  this knob's measurement model and field table
+#
+# Both build for the host, so
+#   cargo test --target x86_64-unknown-linux-gnu
+# checks them against vectors from the Python without a board attached. The
+# explicit --target is needed because `.cargo/config.toml` pins the build to
+# the RP2350.
+[workspace]
+members = ["crates/iekf", "crates/cadmouse-model"]
 
 [[bin]]
 name = "cad-mouse-mk2-firmware"
@@ -50,6 +57,9 @@ tli493d = { path = "../tli493d", features = ["defmt"] }
 embassy-embedded-hal = "0.6.0"
 smart-leds = "0.4.0"
 libm = "0.2"
+
+cadmouse-model = { path = "crates/cadmouse-model" }
+iekf = { path = "crates/iekf", features = ["defmt"] }
 
 # Speed, not size. The estimator has a hard 2 kHz deadline and 'z' suppresses
 # exactly the inlining and unrolling a bicubic interpolation depends on, while

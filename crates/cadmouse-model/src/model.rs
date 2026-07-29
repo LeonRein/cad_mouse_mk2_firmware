@@ -176,6 +176,7 @@ pub fn forward(pose: &Pose, table: &FieldTable) -> [f32; MEAS_DIM] {
 }
 
 /// Predicted counts and `d(counts)/d(local pose perturbation)`.
+#[inline(always)]
 pub fn forward_and_jac(
     pose: &Pose,
     table: &FieldTable,
@@ -235,6 +236,112 @@ pub fn forward_and_jac(
         }
     }
     (counts, jac)
+}
+
+/// Right Jacobian of SO(3), relating the two rotation conventions.
+///
+/// [`forward_and_jac`] differentiates a *local* perturbation, which avoids
+/// differentiating Rodrigues' formula. A filter carrying a plain rotation
+/// vector in its state varies the vector itself. The two are related by
+/// `exp((theta + d)^) ~= exp(theta^) exp((Jr(theta) d)^)`, so a Jacobian in the
+/// local convention becomes one in the vector convention by right-multiplying
+/// the rotation block by this matrix.
+///
+/// At the few degrees this mechanism reaches `Jr` differs from the identity by
+/// under a percent -- but it is the difference between a filter that converges
+/// quadratically and one that limps, and it costs almost nothing.
+pub fn right_jacobian_so3(rv: &[f32; 3]) -> [[f32; 3]; 3] {
+    let theta2 = rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2];
+    let kx = skew(rv);
+    let kx2 = matmul3(&kx, &kx);
+
+    // Below this the closed form loses the cancellation in (1 - cos)/theta^2
+    // to f32 rounding; the series is exact enough well past where it is used.
+    let (a, b) = if theta2 < 1e-8 {
+        (0.5, 1.0 / 6.0)
+    } else {
+        let theta = sqrtf(theta2);
+        (
+            (1.0 - cosf(theta)) / theta2,
+            (theta - sinf(theta)) / (theta2 * theta),
+        )
+    };
+
+    let mut out = [[0.0f32; 3]; 3];
+    for r in 0..3 {
+        for c in 0..3 {
+            let ident = if r == c { 1.0 } else { 0.0 };
+            out[r][c] = ident - a * kx[r][c] + b * kx2[r][c];
+        }
+    }
+    out
+}
+
+/// Predicted counts and `d(counts)/d(pose vector)`.
+///
+/// The convention a filter carrying a six-element state wants;
+/// [`forward_and_jac`] uses the local one.
+#[inline(always)]
+pub fn forward_and_jac_vector(
+    pose: &Pose,
+    table: &FieldTable,
+) -> ([f32; MEAS_DIM], [[f32; POSE_DIM]; MEAS_DIM]) {
+    let (counts, local) = forward_and_jac(pose, table);
+    let right = right_jacobian_so3(&[pose[3], pose[4], pose[5]]);
+
+    let mut jac = local;
+    for row in jac.iter_mut() {
+        let rot = [row[3], row[4], row[5]];
+        for c in 0..3 {
+            row[3 + c] = rot[0] * right[0][c] + rot[1] * right[1][c] + rot[2] * right[2][c];
+        }
+    }
+    (counts, jac)
+}
+
+/// The knob as an [`iekf::MeasurementModel`]: six-element pose in, nine counts
+/// out.
+///
+/// Borrows the table rather than owning it so the filter does not care whether
+/// it is reading flash or the RAM copy.
+pub struct PoseModel<'a> {
+    pub table: &'a FieldTable,
+}
+
+impl<'a> PoseModel<'a> {
+    pub fn new(table: &'a FieldTable) -> Self {
+        Self { table }
+    }
+}
+
+impl iekf::MeasurementModel<POSE_DIM, MEAS_DIM> for PoseModel<'_> {
+    #[inline]
+    fn predict_and_jacobian(
+        &self,
+        state: &[f32; POSE_DIM],
+    ) -> ([f32; MEAS_DIM], [[f32; POSE_DIM]; MEAS_DIM]) {
+        forward_and_jac_vector(state, self.table)
+    }
+}
+
+#[inline]
+fn skew(v: &[f32; 3]) -> [[f32; 3]; 3] {
+    [
+        [0.0, -v[2], v[1]],
+        [v[2], 0.0, -v[0]],
+        [-v[1], v[0], 0.0],
+    ]
+}
+
+#[inline]
+fn matmul3(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut out = [[0.0f32; 3]; 3];
+    for r in 0..3 {
+        for c in 0..3 {
+            out[r][c] = a[r][0] * b[0][c] + a[r][1] * b[1][c] + a[r][2] * b[2][c];
+        }
+    }
+    out
 }
 
 #[inline]

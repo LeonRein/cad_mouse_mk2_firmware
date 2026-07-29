@@ -123,6 +123,7 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 name = "cad-mouse-mk2-firmware"
 version = "0.1.0"
 dependencies = [
+ "cadmouse-model",
  "cortex-m",
  "cortex-m-rt",
  "defmt",
@@ -138,11 +139,20 @@ dependencies = [
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
  "embedded-storage",
+ "iekf",
  "libm",
  "panic-probe",
  "smart-leds",
  "static_cell",
  "tli493d",
+]
+
+[[package]]
+name = "cadmouse-model"
+version = "0.1.0"
+dependencies = [
+ "iekf",
+ "libm",
 ]
 
 [[package]]
@@ -787,6 +797,14 @@ name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+
+[[package]]
+name = "iekf"
+version = "0.1.0"
+dependencies = [
+ "defmt",
+ "libm",
+]
 
 [[package]]
 name = "indexmap"

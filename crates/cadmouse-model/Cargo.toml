@@ -1,0 +1,9 @@
+[package]
+name = "cadmouse-model"
+version = "0.1.0"
+edition = "2024"
+description = "Measurement model and field table for the CAD Mouse MK2 knob"
+
+[dependencies]
+libm = "0.2"
+iekf = { path = "../iekf" }

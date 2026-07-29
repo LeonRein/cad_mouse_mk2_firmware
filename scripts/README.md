@@ -1,16 +1,19 @@
 # CAD Mouse MK2 — host-side tooling
 
-The firmware streams nine raw magnetic field readings over USB; turning those
-into the knob's six degrees of freedom happens on the host. The previous
-estimator was removed as buggy and is being rewritten from scratch; the
-`cadmouse` package is that rewrite, in progress.
+The firmware streams nine raw magnetic field readings over USB; this is where
+the model behind them is developed, fitted and checked. The estimation itself
+now runs on the device — see [Two calibrations](#two-calibrations) and
+[Exporting to the firmware](#exporting-to-the-firmware) — and the host tooling
+is what produces the calibration it runs with, and the reference it is checked
+against.
 
 Present and working end to end: the magnet model, the measurement function and
-its Jacobian, the session loader, the calibration fit, and the filter. Absent:
-the f32 pass, the golden vectors, and the Rust port.
+its Jacobian, the session loader, the calibration fit, the filter, the golden
+vectors, and the Rust port they check. Absent: HID output, and the sleep state.
 
 ```
-uv run pytest                            # the gates for what exists so far
+uv run pytest                            # the gates for the Python
+cd .. && cargo test --target x86_64-unknown-linux-gnu   # ...and for the port
 ```
 
 Everything here is Python, run with [uv](https://docs.astral.sh/uv/).
@@ -33,12 +36,39 @@ Each has `--help`, and each has a section below. `calibrate.py` and `export.py`
 are thin wrappers over `cadmouse/calibrate.py` and `cadmouse/export.py`, which
 is where the work and the explanations live.
 
-One diagnostic sits outside that flow, since it answers a design question
-rather than producing an artefact:
+Two more sit outside that flow. The first answers a design question rather than
+producing an artefact; the second produces the vectors the Rust port is checked
+against, and should be re-run whenever the model or the calibration changes:
 
 ```
 uv run python -m cadmouse.filter data/session1.csv calibration.json  # IEKF vs UKF
+uv run python -m cadmouse.golden data/session1.csv calibration.json  # golden vectors
 ```
+
+## Two calibrations
+
+Which is which matters, because they are easy to confuse and they answer
+different questions.
+
+| | on the PC (`calibrate.py`) | on the device |
+|---|---|---|
+| fits | 27 parameters of the mechanism | rest pose, sensor noise, deadzone |
+| needs | a ~90 s recorded session, all six axes exercised | nothing; hands off the knob |
+| costs | an optimiser and a few minutes | about a second |
+| how often | once per device | every power-up, and on demand |
+| delivered by | `export.py` baking it into the firmware | measured live, held in RAM |
+
+The device one is triggered by **holding both buttons for five seconds** (the
+ring fills one pixel per second so the hold is visible), and it also runs
+unprompted at boot. It refuses to finish if the pose moved while it was
+measuring — a bad zero is worse than no zero, since it is silently wrong for as
+long as the device stays powered. `uv run record.py --check` reports whether
+the attached device is calibrated, and `view.py` shows it live.
+
+Nothing about the device calibration is written to flash, deliberately: it
+costs a second to redo, and writing flash while core 1 executes from XIP is a
+hazard worth not taking on for it. It is also why there is no thermal drift
+model — a re-zero corrects the bias whatever caused it.
 
 ## Recording a session
 
@@ -290,15 +320,37 @@ backend.
 uv run export.py calibration.json
 ```
 
-Writes `gen/field_table.bin` (85 kB of raw little-endian `f32`, pulled in with
-`include_bytes!`) and `src/generated.rs` (grid metadata, geometry, the fitted
+Writes `crates/cadmouse-model/gen/field_table.bin` (85 kB of raw little-endian
+`f32`, pulled in with `include_bytes!`) and
+`crates/cadmouse-model/src/generated.rs` (grid metadata, geometry, the fitted
 calibration). Both come from the same objects this package uses, so the
 firmware cannot drift away from what the calibration was fitted against.
 
-The Rust side lives in `src/magnet.rs` and `src/model.rs` — direct ports of
-`cadmouse/magnet.py` and `cadmouse/model.py`, and they have to stay direct
-ports or the golden vectors stop being a check of one function and become a
-comparison of two.
+The Rust is a workspace, split along the line of what is reusable:
+
+| crate | holds | tested by |
+|---|---|---|
+| `crates/iekf` | the filter itself, `no_std`, no allocation, const-generic over states and measurements. Knows nothing about magnets. | its own unit tests |
+| `crates/cadmouse-model` | `magnet.rs` and `model.rs` — direct ports of `cadmouse/magnet.py` and `cadmouse/model.py` — plus the generated calibration, the tuning, and the rest calibration | `tests/golden.rs`, against `cadmouse.golden` |
+| the root crate | the firmware: pins, sensors, LEDs, buttons, the wire format, and the core-1 estimator task | the board |
+
+The two ported files have to stay *direct* ports, or the golden vectors stop
+being a check of one function and become a comparison of two.
+
+### What the golden vectors actually say
+
+`cargo test --target x86_64-unknown-linux-gnu` runs the port against vectors
+this package generated. Measured agreement, f32 Rust against f64 NumPy:
+
+| | disagreement | for scale |
+|---|---|---|
+| `forward` | 0.0006 counts | the noise floor is 1.08 counts |
+| `forward_and_jac_vector` | 5.5e-6 relative | — |
+| 400 filtered frames | 0.002 µm, 1e-5° | one frame resolves 5.6 µm |
+
+So the port costs nothing measurable, and the tolerances in `golden.rs` are set
+about ten times looser than what was measured — a failure there means one of
+the two implementations moved, not that f32 finally ran out of bits.
 
 To time it on target:
 
@@ -306,38 +358,69 @@ To time it on target:
 cargo run --bin bench_forward
 ```
 
-Measured on the RP2350 at 150 MHz, `opt-level = 3`, against a 2 kHz budget of
-75 000 cycles:
+Measured on the RP2350 at 150 MHz, `opt-level = 3`. The budget is 75 000 cycles
+at 2 kHz, or 150 000 at 1 kHz.
 
-| | cycles | ns |
-|---|---|---|
-| `forward`, table in flash | 20 331 | 135 540 |
-| `forward`, table in RAM | **12 298** | 81 986 |
-| `forward_and_jac`, flash | 29 877 | 199 180 |
-| `forward_and_jac`, RAM | **20 383** | 135 886 |
-| one bicubic sample, RAM | 672 | 4 480 |
+| | cycles |
+|---|---|
+| `forward`, table in flash | 21 100 |
+| `forward`, table in RAM | **11 900** |
+| `forward_and_jac`, RAM | 20 100 |
+| `forward_and_jac_vector`, RAM | 24 400 |
+| one bicubic sample, RAM | 676 |
+| filter's own algebra, no model (1 iteration) | 24 200 |
+| **whole IEKF step, 2 iterations, code in flash** | **298 000** |
+| **whole IEKF step, 2 iterations, code in RAM** | **141 300** |
 
-What follows from it:
+### The one that matters: put the *code* in RAM too
 
-- **Only the EKF family fits.** A six-state UKF needs 13 × 12 298 = 159 900
-  cycles, over twice the budget; twelve-state needs 307 000. An IEKF at one to
-  two iterations needs 20 400–40 800, i.e. 27–54 %. The earlier estimate of
-  ~3500 cycles per `h()` was 3.5–6x optimistic and had the six-state UKF
-  fitting — it does not.
-- **Copy the table into RAM.** It is worth 1.65x, and 85 kB against 520 kB of
-  SRAM is cheap. XIP cache misses dominate otherwise.
-- **The bicubic is about half the cost** — 9 × 672 = 6050 of 12 300 cycles —
-  so that is where any optimisation should start. `field_and_grad` is currently
-  not inlined (nine `bl` calls per `forward`), the index arithmetic carries
-  bounds checks, and `sqrtf` is a software call; all three are recoverable.
+The headline result is not about the algorithm. The model costs 24 400 cycles
+in a tight loop and the filter's algebra costs 24 200 in a tight loop, so a
+step should cost about 50 000 — and it measured 298 000. Neither the trait
+call, nor the covariance's condition, nor subnormal operands accounted for any
+of it, and each was ruled out by measurement rather than by argument.
+
+The cause is that this part executes from **external QSPI flash through a
+small XIP cache**. Each of those two loops fits in it; together they do not,
+so every pass refetches. Placing one `#[link_section = ".data"]` function —
+`estimator::filter_step` — and making its callees `inline(always)` so they come
+with it cut the step by **2.1x**, with no change to the arithmetic.
+
+Two consequences worth carrying forward:
+
+- **Anything added to `filter_step`'s call graph must be inlinable into it**,
+  or it quietly moves back to flash and takes the 2x with it.
+- **Benchmark numbers here are layout-sensitive.** Adding an unrelated
+  benchmark moved others by 20-40 %, because what is really being measured is
+  how the working set falls across the cache. Compare configurations within one
+  run, not across runs.
+
+### Where that leaves the rate
+
+At 141 300 cycles a step is 0.94 ms, so the filter sustains about 1060 Hz. The
+readout runs at 2000-2235 Hz, so **core 1 currently sees roughly every other
+sample** — it reports itself as "6 frames behind" in the device log, and the
+host sees no loss because dropping is the designed behaviour, not a failure.
+This costs less than it sounds (the filter is fed twice the samples its noise
+model needs) but it is not the intended steady state. What is left, in the
+order the benchmark says to do it:
+
+1. Pull the rest of the call graph into RAM — `field_and_grad`,
+   `rotation_from_rotvec` and `right_jacobian_so3` are still in flash.
+2. Drop to one relinearisation pass, worth ~60 000 cycles, if step 1 is not
+   enough. On the recorded data one to five passes are indistinguishable.
+3. The bicubic, which is 9 × 676 = 6 100 of the model's cost.
 
 The port is validated against the host in the same run: `forward(0)` returns
-`[8.120877, 24.266603, 510.744, …]` in f32 against `[8.1, 24.3, 510.7, …]` from
-f64 NumPy, and the flash and RAM tables agree to 0.0 counts.
+`[8.121126, 24.265835, 510.74326, …]` in f32 against `[8.1, 24.3, 510.7, …]`
+from f64 NumPy, and the flash and RAM tables agree to 0.0 counts.
 
 ## Not done here
 
-On-device Rust estimation; HID output; thermal drift
-compensation (deliberately dropped — a runtime re-zero corrects bias drift
-whatever its cause); the sequential-sampling skew between the three sensors,
-beyond trimming the transition frames it corrupts (`SETTLE_S` in `dataset.py`).
+HID output and the buttons that will ride along with it; the sleep state; the
+sequential-sampling skew between the three sensors, beyond trimming the
+transition frames it corrupts (`SETTLE_S` in `dataset.py`).
+
+Deliberately dropped: thermal drift compensation — a re-zero corrects bias
+drift whatever its cause, and the device now measures its own rest at every
+power-up.

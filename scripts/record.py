@@ -34,26 +34,63 @@ from typing import Iterator
 # --------------------------------------------------------------------------
 # Wire format
 #
-# Defined by `format_frame` in ``src/sensors.rs`` and must be kept in step with
-# it:
+# Defined by ``Frame::encode`` in ``src/protocol.rs`` and must be kept in step
+# with it:
 #
 #   offset  size  field
-#   0          2  magic 0xA55A
+#   0          2  magic 0xA55B
 #   2          2  seq, wrapping frame counter
 #   4          4  t_us, device uptime in microseconds
 #   8         18  nine int16 raw counts, MAG1/2/3 x,y,z
+#   26        24  six float32 pose: x, y, z (mm), rx, ry, rz (rad)
+#   50         4  float32 normalised innovation squared
+#   54         1  status bits, see STATUS_*
+#   55         1  calibration progress, 0-255
 #
 # The sequence number is the point of the whole exercise. The firmware
 # increments it on every *attempted* read including failed ones, so a gap here
 # means a sample was genuinely lost rather than the hand having paused -- which
 # is the difference between a usable velocity estimate and a quietly wrong one.
+#
+# The pose is the device's *own* estimate, after zeroing and its deadzone. It
+# is carried alongside the counts rather than instead of them so that a
+# recording can still be re-filtered on the host with different tuning -- and
+# so that the on-device port can be checked against the Python on live data,
+# which is the only end-to-end test there is.
+#
+# The magic word changed with the pose fields. A tool built for the old 26-byte
+# frame now finds no frames at all, which beats one that reads pose bytes as
+# the next sample's counts.
 # --------------------------------------------------------------------------
 
-FRAME_MAGIC = 0xA55A
-FRAME_LEN = 26
-_FRAME = struct.Struct("<HHI9h")
+FRAME_MAGIC = 0xA55B
+FRAME_LEN = 56
+_FRAME = struct.Struct("<HHI9h6ffBB")
 
 assert _FRAME.size == FRAME_LEN, "struct format out of step with FRAME_LEN"
+
+#: Status bits in the frame, mirroring ``protocol::status`` in the firmware.
+STATUS_FILTER_VALID = 1 << 0
+STATUS_CALIBRATED = 1 << 1
+STATUS_CALIBRATING = 1 << 2
+STATUS_CALIBRATION_ABORTED = 1 << 3
+STATUS_DIVERGED = 1 << 4
+STATUS_IN_DEADZONE = 1 << 5
+
+STATUS_NAMES = [
+    (STATUS_FILTER_VALID, "valid"),
+    (STATUS_CALIBRATED, "calibrated"),
+    (STATUS_CALIBRATING, "calibrating"),
+    (STATUS_CALIBRATION_ABORTED, "cal-aborted"),
+    (STATUS_DIVERGED, "DIVERGED"),
+    (STATUS_IN_DEADZONE, "at-rest"),
+]
+
+
+def describe_status(status: int) -> str:
+    """Human-readable status bits, for logs and the live view."""
+    flags = [name for bit, name in STATUS_NAMES if status & bit]
+    return ",".join(flags) if flags else "none"
 
 #: The firmware's USB identity (`src/main.rs`): VID 0xc0de, PID 0xcafe,
 #: manufacturer "CAD Mouse", product "CAD Mouse MK2", serial "00000001".
@@ -62,6 +99,18 @@ DEVICE_GLOB = "/dev/serial/by-id/*CAD_Mouse*"
 #: Channel order of the 9-vector, matching the firmware's ``[i16; 9]``
 #: (``src/sensors.rs`` ``read_raw``) and the C++ reference's ``readRaw``.
 CHANNEL_NAMES = [f"mag{i + 1}{ax}" for i in range(3) for ax in "xyz"]
+
+#: Extra CSV columns carrying what the device itself thought the pose was.
+DEVICE_POSE_COLUMNS = [
+    "dev_x",
+    "dev_y",
+    "dev_z",
+    "dev_rx",
+    "dev_ry",
+    "dev_rz",
+    "dev_nis",
+    "dev_status",
+]
 
 #: Raw counts are sign-extended 12-bit (`../tli493d/src/register.rs`), so a
 #: reading at this magnitude means the ADC railed and the sample is unusable.
@@ -119,6 +168,14 @@ class Frame:
     seq: int
     t_us: int
     counts: tuple[int, ...]  # nine raw counts, MAG1/2/3 x,y,z
+    #: The device's own pose estimate: mm and radians, zeroed and deadzoned.
+    pose: tuple[float, ...] = (0.0,) * 6
+    #: Normalised innovation squared from the device's filter. Should average
+    #: nine -- one per channel -- if the device's own R and Q are honest.
+    nis: float = 0.0
+    status: int = 0
+    #: Calibration progress, 0-255, meaningful while ``STATUS_CALIBRATING``.
+    progress: int = 0
 
 
 @dataclass
@@ -150,12 +207,21 @@ class FrameDecoder:
                 self.resyncs += 1
                 continue
 
-            magic, seq, t_us, *counts = _FRAME.unpack_from(self.buffer, 0)
+            fields = _FRAME.unpack_from(self.buffer, 0)
             del self.buffer[:FRAME_LEN]
+            magic, seq, t_us = fields[0], fields[1], fields[2]
             if magic != FRAME_MAGIC:  # defensive; the scan above should prevent it
                 self.resyncs += 1
                 continue
-            yield Frame(seq=seq, t_us=t_us, counts=tuple(counts))
+            yield Frame(
+                seq=seq,
+                t_us=t_us,
+                counts=tuple(fields[3:12]),
+                pose=tuple(fields[12:18]),
+                nis=fields[18],
+                status=fields[19],
+                progress=fields[20],
+            )
 
 
 @dataclass
@@ -241,12 +307,16 @@ def check_link(port: str | None, seconds: float = 3.0) -> StreamStats:
     peak = 0
     saturated = 0
     stats = StreamStats()
+    last: Frame | None = None
+    nis_total = 0.0
     deadline = time.monotonic() + seconds
     for frame, stats in read_frames(port):
         largest = max(abs(c) for c in frame.counts)
         peak = max(peak, largest)
         if largest >= ADC_FULL_SCALE_COUNTS:
             saturated += 1
+        nis_total += frame.nis
+        last = frame
         if time.monotonic() >= deadline:
             break
 
@@ -255,6 +325,19 @@ def check_link(port: str | None, seconds: float = 3.0) -> StreamStats:
         return stats
 
     print(f"  {stats.summary()}")
+    if last is not None:
+        pose_mm = ", ".join(f"{v:+.4f}" for v in last.pose[:3])
+        pose_deg = ", ".join(f"{v * 57.29578:+.3f}" for v in last.pose[3:])
+        print(f"  device status: {describe_status(last.status)}")
+        print(f"  device pose:   [{pose_mm}] mm  [{pose_deg}] deg")
+        # Nine channels, so an honest filter averages nine. Well above means
+        # the device is claiming more certainty than it has.
+        print(f"  device NIS:    {nis_total / stats.received:.2f} (target 9)")
+        if last.status & STATUS_CALIBRATION_ABORTED:
+            print("  WARNING: the device's rest calibration was abandoned -- it saw")
+            print("           the knob move. Leave it alone and hold both buttons 5 s.")
+        if not last.status & STATUS_CALIBRATED:
+            print("  NOTE: the device has not completed a rest calibration.")
     print(
         f"  peak |count| = {peak} of {ADC_FULL_SCALE_COUNTS} "
         f"({peak / ADC_FULL_SCALE_COUNTS:.0%} of full scale)"
@@ -285,7 +368,9 @@ def record_segment(
     started = time.monotonic()
     deadline = started + seconds
     for frame, stats in read_frames(port):
-        writer.writerow([label, frame.seq, frame.t_us, *frame.counts])
+        writer.writerow(
+            [label, frame.seq, frame.t_us, *frame.counts, *frame.pose, frame.nis, frame.status]
+        )
         written += 1
         now = time.monotonic()
         if written % 128 == 0:
@@ -332,7 +417,11 @@ def main(argv: list[str] | None = None) -> int:
     total = 0
     with args.output.open("w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["segment", "seq", "t_us", *CHANNEL_NAMES])
+        # The device's own estimate rides along in the trailing columns. The
+        # fit ignores them -- `cadmouse.dataset` selects the columns it needs
+        # by name -- but keeping them means a recording can be used to check
+        # the firmware's filter against the host's after the fact.
+        writer.writerow(["segment", "seq", "t_us", *CHANNEL_NAMES, *DEVICE_POSE_COLUMNS])
         for label, seconds, instruction in DEFAULT_PLAN:
             _prompt(f"[{label}] {instruction}  ({seconds:.0f} s)")
             total += record_segment(label, seconds, port, writer)
