@@ -38,6 +38,10 @@ fn matvec(m: &[[f32; 3]; 3], v: &[f32; 3]) -> [f32; 3] {
 /// The knob never exceeds a few degrees, so the series would do -- but a
 /// rotation that quietly stops being orthonormal is a miserable thing to debug
 /// on a target with no debugger attached.
+///
+/// Relocated to SRAM: see [the note on `field_and_grad`](field_and_grad).
+#[unsafe(link_section = ".data")]
+#[inline(never)]
 pub fn rotation_from_rotvec(rv: &[f32; 3]) -> [[f32; 3]; 3] {
     let theta2 = rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2];
     if theta2 < 1e-16 {
@@ -83,7 +87,22 @@ fn cosf(x: f32) -> f32 {
 /// coordinate and `e` for the radial unit vector, `B = b_rho e + b_z axis`,
 /// and both `rho` and `e` depend on `delta` and `axis` in turn. `e . axis == 0`
 /// kills the cross terms.
-#[inline]
+///
+/// # Why `.data` and `inline(never)`
+///
+/// This crate's hot path executes from external QSPI flash through a small XIP
+/// cache, and the working set does not fit. `.data` is copied to SRAM by the
+/// startup code, so placing a function there takes it out of that contest;
+/// doing it for this one, [`FieldTable::sample`], [`rotation_from_rotvec`] and
+/// [`right_jacobian_so3`] cut a filter step by 35 % on target.
+///
+/// `inline(never)` is the load-bearing half. Forcing these inline instead was
+/// measured **14 % slower**: this is called nine times per Jacobian, so
+/// inlining duplicates it nine times and grows the very working set the
+/// relocation exists to shrink. One shared copy in SRAM beats nine in flash.
+/// Do not "optimise" the attribute away -- see `scripts/README.md`.
+#[unsafe(link_section = ".data")]
+#[inline(never)]
 fn field_and_grad(
     table: &FieldTable,
     delta: &[f32; 3],
@@ -249,6 +268,10 @@ pub fn forward_and_jac(
 /// At the few degrees this mechanism reaches `Jr` differs from the identity by
 /// under a percent -- but it is the difference between a filter that converges
 /// quadratically and one that limps, and it costs almost nothing.
+///
+/// Relocated to SRAM: see [the note on `field_and_grad`](field_and_grad).
+#[unsafe(link_section = ".data")]
+#[inline(never)]
 pub fn right_jacobian_so3(rv: &[f32; 3]) -> [[f32; 3]; 3] {
     let theta2 = rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2];
     let kx = skew(rv);

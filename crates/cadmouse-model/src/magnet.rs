@@ -124,7 +124,12 @@ impl FieldTable {
     /// together costs barely more than one -- and the derivatives fall out of
     /// the same 4x4 gather, which is what makes an analytic measurement
     /// Jacobian nearly free and an iterated EKF cheaper than a UKF here.
-    #[inline]
+    ///
+    /// Relocated to SRAM, and deliberately not inlined despite being called
+    /// nine times per Jacobian -- that is exactly why. See the note on
+    /// `model::field_and_grad`.
+    #[unsafe(link_section = ".data")]
+    #[inline(never)]
     pub fn sample(&self, rho: f32, z: f32) -> Sample {
         let (i0, tu, live_u) = stencil(rho, consts::RHO0, consts::D_RHO, consts::N_RHO);
         let (j0, tv, live_v) = stencil(z, consts::Z0, consts::D_Z, consts::N_Z);

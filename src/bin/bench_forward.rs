@@ -99,6 +99,45 @@ fn ram_filter_step(
     let _ = ekf.update(model, z);
 }
 
+/// A measurement model that does no work, so a filter step using it costs only
+/// the filter's own linear algebra.
+///
+/// Hoisted to module scope so the same type can be driven from flash and from
+/// RAM. `inline(never)` is what makes it a fair subtraction: the point is to
+/// keep the call, and only remove what is behind it.
+struct TrivialModel {
+    counts: [f32; MEAS_DIM],
+    jac: [[f32; POSE_DIM]; MEAS_DIM],
+}
+
+impl iekf::MeasurementModel<POSE_DIM, MEAS_DIM> for TrivialModel {
+    #[inline(never)]
+    fn predict_and_jacobian(
+        &self,
+        _state: &[f32; POSE_DIM],
+    ) -> ([f32; MEAS_DIM], [[f32; POSE_DIM]; MEAS_DIM]) {
+        (self.counts, self.jac)
+    }
+}
+
+/// The filter's own algebra with the code in RAM, for comparison against the
+/// identical loop running from flash.
+///
+/// This exists to settle whether "filter only, no model" is measuring the
+/// algebra or measuring the XIP cache. If the two differ by roughly the same
+/// factor as the full step does, the flash figure was never a cost of the
+/// arithmetic.
+#[unsafe(link_section = ".data")]
+#[inline(never)]
+fn ram_trivial_step(
+    ekf: &mut IteratedEkf<POSE_DIM, MEAS_DIM>,
+    model: &TrivialModel,
+    z: &[f32; MEAS_DIM],
+) {
+    ekf.predict(0.0005);
+    let _ = ekf.update(model, z);
+}
+
 fn cycles<F: FnMut()>(mut body: F) -> u32 {
     let start = DWT::cycle_count();
     body();
@@ -306,20 +345,6 @@ async fn main(_spawner: Spawner) {
     // above is what the model actually costs *when called from here* rather
     // than from a tight loop.
     {
-        struct TrivialModel {
-            counts: [f32; MEAS_DIM],
-            jac: [[f32; POSE_DIM]; MEAS_DIM],
-        }
-        impl iekf::MeasurementModel<POSE_DIM, MEAS_DIM> for TrivialModel {
-            #[inline(never)]
-            fn predict_and_jacobian(
-                &self,
-                _state: &[f32; POSE_DIM],
-            ) -> ([f32; MEAS_DIM], [[f32; POSE_DIM]; MEAS_DIM]) {
-                (self.counts, self.jac)
-            }
-        }
-
         let (counts, jac) = cadmouse_model::model::forward_and_jac_vector(&poses[0], &ram_table);
         let trivial = TrivialModel { counts, jac };
 
@@ -346,6 +371,20 @@ async fn main(_spawner: Spawner) {
                 _ => report("filter only, no model (2 iterations)", total, calls),
             }
         }
+
+        // The identical loop with the code in SRAM. Same matrices, same call,
+        // same trivial model -- the only variable is where the instructions
+        // live, so the ratio between this and the run above is a pure
+        // measurement of the XIP cache rather than of the linear algebra.
+        ekf.set_iterations(1);
+        let total = cycles(|| {
+            for _ in 0..N_REPS {
+                for _ in 0..N_POSES {
+                    ram_trivial_step(&mut ekf, &trivial, core::hint::black_box(&counts));
+                }
+            }
+        });
+        report("filter only, no model (1 iteration), CODE IN RAM", total, calls);
     }
 
     // The same step, but with the code itself in SRAM instead of executing

@@ -395,69 +395,85 @@ To time it on target:
 cargo run --bin bench_forward
 ```
 
-> **Stale as of 2026-07-30 and not yet re-measured.** Correcting the magnet
-> geometry grew the field table from 85 kB to 97 kB (153 × 81 rather than
-> 141 × 77), and every number below is a measurement of how a working set falls
-> across a small XIP cache — see [the one that matters](#the-one-that-matters-put-the-code-in-ram-too).
-> A 14 % larger table is exactly the kind of change these figures are sensitive
-> to, and the RAM-table rows in particular now ask for more SRAM. Re-run
-> `cargo run --bin bench_forward` on the board before trusting any of it.
-
-Measured on the RP2350 at 150 MHz, `opt-level = 3`. The budget is 75 000 cycles
-at 2 kHz, or 150 000 at 1 kHz.
+Measured on the RP2350 at 150 MHz, `opt-level = 3`, re-run 2026-07-30 against
+the 97 kB table. The budget is 75 000 cycles at 2 kHz, or 150 000 at 1 kHz.
 
 | | cycles |
 |---|---|
-| `forward`, table in flash | 21 100 |
-| `forward`, table in RAM | **11 900** |
-| `forward_and_jac`, RAM | 20 100 |
-| `forward_and_jac_vector`, RAM | 24 400 |
-| one bicubic sample, RAM | 676 |
-| filter's own algebra, no model (1 iteration) | 24 200 |
-| **whole IEKF step, 2 iterations, code in flash** | **298 000** |
-| **whole IEKF step, 2 iterations, code in RAM** | **141 300** |
+| `forward`, table in flash | 21 149 |
+| `forward`, table in RAM | 13 713 |
+| `forward_and_jac`, RAM | 21 318 |
+| `forward_and_jac_vector`, RAM | 25 031 |
+| one bicubic sample, RAM | 729 |
+| `right_jacobian_so3` alone | 3 462 |
+| filter algebra, no model, 1 iteration | 28 119 |
+| filter algebra, no model, 1 iteration, code in RAM | 26 242 |
+| whole IEKF step, 2 iterations, code in flash | 199 870 |
+| **whole IEKF step, 2 iterations, code in RAM** | **106 830** |
 
 ### The one that matters: put the *code* in RAM too
 
-The headline result is not about the algorithm. The model costs 24 400 cycles
-in a tight loop and the filter's algebra costs 24 200 in a tight loop, so a
-step should cost about 50 000 — and it measured 298 000. Neither the trait
-call, nor the covariance's condition, nor subnormal operands accounted for any
-of it, and each was ruled out by measurement rather than by argument.
+The headline result is not about the algorithm. The model and the filter algebra
+are each fast alone and slow together, which is the signature of a working set
+that no longer fits the **XIP cache** this part executes through. Neither the
+trait call, nor the covariance's condition, nor subnormal operands accounted for
+any of it, and each was ruled out by measurement rather than by argument.
 
-The cause is that this part executes from **external QSPI flash through a
-small XIP cache**. Each of those two loops fits in it; together they do not,
-so every pass refetches. Placing one `#[link_section = ".data"]` function —
-`estimator::filter_step` — and making its callees `inline(always)` so they come
-with it cut the step by **2.1x**, with no change to the arithmetic.
+The fix is `#[link_section = ".data"]`, which the startup code copies to SRAM.
+`estimator::filter_step` was placed there first. On 2026-07-30 the rest of the
+hot call graph followed — `field_and_grad`, `FieldTable::sample`,
+`rotation_from_rotvec` and `right_jacobian_so3` — cutting the step a further
+**35 %**, 164 360 to 106 830, with no change to the arithmetic:
+
+| relocated | step, code in RAM |
+|---|---|
+| `filter_step` only | 164 360 |
+| ...plus `field_and_grad` | 129 567 |
+| ...plus `FieldTable::sample` | 126 011 |
+| ...plus both rotation helpers | **106 830** |
+
+Total SRAM cost: `.data` is 18.8 kB, against 520 kB on the part.
+
+**`inline(always)` is the wrong tool, and this was measured.** The obvious way
+to drag a callee into SRAM is to force it inline so it comes along inside
+`filter_step`. Tried on `field_and_grad`, `sample` and both rotation helpers,
+that made everything **14 % slower** — 164 360 to 187 428 — because inlining a
+function called nine times per Jacobian duplicates it nine times and grows the
+very working set the exercise exists to shrink. Relocating the single shared
+copy with `link_section` is strictly better. The functions therefore carry
+`#[inline(never)]` deliberately; do not "optimise" it back.
 
 Two consequences worth carrying forward:
 
-- **Anything added to `filter_step`'s call graph must be inlinable into it**,
-  or it quietly moves back to flash and takes the 2x with it.
-- **Benchmark numbers here are layout-sensitive.** Adding an unrelated
-  benchmark moved others by 20-40 %, because what is really being measured is
-  how the working set falls across the cache. Compare configurations within one
-  run, not across runs.
+- **Anything added to `filter_step`'s call graph must be relocated too**, or it
+  quietly stays in flash and drags the step back through the cache.
+- **Absolute numbers here are binary-specific; only ratios travel.** Adding one
+  unrelated benchmark to this file moved every flash-resident row by 10 %, and
+  the flash-vs-RAM ratio for the filter algebra fell from 1.87 to 1.07 once the
+  model's code left flash — the algebra never changed, only what it was
+  competing with for cache. Compare configurations within one run, never across
+  runs, and do not read the firmware's true rate off this file: measure it in
+  the firmware.
 
 ### Where that leaves the rate
 
-At 141 300 cycles a step is 0.94 ms, so the filter sustains about 1060 Hz. The
-readout runs at 2000-2235 Hz, so **core 1 currently sees roughly every other
-sample** — it reports itself as "6 frames behind" in the device log, and the
-host sees no loss because dropping is the designed behaviour, not a failure.
-This costs less than it sounds (the filter is fed twice the samples its noise
-model needs) but it is not the intended steady state. What is left, in the
-order the benchmark says to do it:
+At 106 830 cycles a step is 0.71 ms, so the filter sustains about **1400 Hz**,
+up from ~910 Hz before the relocation. The readout runs at 2000-2235 Hz, so
+core 1 still does not see every sample, and the host sees no loss because
+dropping is the designed behaviour rather than a failure. What is left:
 
-1. Pull the rest of the call graph into RAM — `field_and_grad`,
-   `rotation_from_rotvec` and `right_jacobian_so3` are still in flash.
-2. Drop to one relinearisation pass, worth ~60 000 cycles, if step 1 is not
-   enough. On the recorded data one to five passes are indistinguishable.
-3. The bicubic, which is 9 × 676 = 6 100 of the model's cost.
+1. **Drop to one relinearisation pass.** The marginal iteration measures 76 223
+   cycles with the code in flash, so roughly 41 000 in RAM — which would put a
+   step near 66 000 and **inside the 75 000-cycle 2 kHz budget**. On the
+   recorded data one to five passes are indistinguishable, so this looks close
+   to free, but it changes the shipped filter's behaviour and is a deliberate
+   call rather than a tuning tweak: set `tuning::ITERATIONS`.
+2. Relocate the `iekf` linear algebra as well. It is now only 26 242 cycles of
+   the step and its flash/RAM gap has already collapsed, so expect little.
+3. The bicubic, 9 × 729 = 6 600 of the model's cost.
 
 The port is validated against the host in the same run: `forward(0)` returns
-`[8.124218, 24.257837, 510.74368, …]` in f32 against `[8.1, 24.3, 510.7, …]`
+`[8.124213, 24.257881, 510.74365, …]` in f32 against `[8.1, 24.3, 510.7, …]`
 from f64 NumPy, and the flash and RAM tables agree to 0.0 counts.
 
 ## Using it as a mouse: HID and spacenavd
