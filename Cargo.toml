@@ -25,8 +25,8 @@ test = false
 bench = false
 
 # Cycle-counts the measurement function on target; see its module docs.
-#   cargo run --bin bench_forward
-#   cargo run --profile release-fast --bin bench_forward
+# Use --release: `dev` carries overflow checks and is not what ships.
+#   cargo run --release --bin bench_forward
 [[bin]]
 name = "bench_forward"
 path = "src/bin/bench_forward.rs"
@@ -69,6 +69,13 @@ debug = 2
 lto = true
 opt-level = 3
 
+# `dev` keeps Cargo's defaults for everything except optimisation, so it still
+# carries `debug-assertions` and `overflow-checks` and is a genuinely different
+# build from what ships. Measured on the board, that costs the sensor loop a
+# third of its rate: 1339 Hz against 2264 Hz from identical source.
+#
+# Nothing about a flashed binary says which profile made it, so `build.rs`
+# prints a warning on every `dev` build. Do not take timing numbers from one.
 [profile.dev]
 debug = 2
 lto = true

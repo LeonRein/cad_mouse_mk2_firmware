@@ -23,7 +23,7 @@ import numpy as np
 
 from .geometry import COUNTS_PER_MT, MAGNET_DIAMETER, MAGNET_HEIGHT, SENSOR_POS
 from .magnet import FieldTable, build_table
-from .params import CalibParams
+from .params import DEFAULT_CALIBRATION, CalibParams
 
 #: Where the firmware expects to find them, relative to the repository root.
 DEFAULT_BLOB = Path("crates/cadmouse-model/gen/field_table.bin")
@@ -53,6 +53,29 @@ def _matrix(name: str, values: np.ndarray, rows: int, cols: int) -> str:
         lines.append(f"    [{_f32_rows(row)}],")
     lines.append("];")
     return "\n".join(lines)
+
+
+def _usage_envelope(params: CalibParams) -> list[str]:
+    """How far the knob travels in ordinary use, or a note that nobody measured.
+
+    Emitted as an `Option` so the firmware has one obvious branch rather than a
+    sentinel value: a recording made before the ``usage`` segment existed says
+    `None`, and `shaping.rs` keeps its built-in default.
+    """
+    head = [
+        "/// Symmetric radius of ordinary use: translation in mm, rotation in",
+        "/// radians, measured from the recording's `usage` segment. This sets",
+        "/// the HID full scale -- see `shaping.rs`. `None` when the session",
+        "/// predates the segment.",
+    ]
+    if params.usage_envelope is None:
+        return [*head, "pub const USAGE_ENVELOPE: Option<(f32, f32)> = None;", ""]
+    t, r = params.usage_envelope
+    return [
+        *head,
+        f"pub const USAGE_ENVELOPE: Option<(f32, f32)> = Some(({t:.9e}, {r:.9e}));",
+        "",
+    ]
 
 
 def write_rust(table: FieldTable, params: CalibParams, blob_bytes: int, path: Path) -> None:
@@ -102,6 +125,7 @@ def write_rust(table: FieldTable, params: CalibParams, blob_bytes: int, path: Pa
         "/// Per-sensor offset in counts.",
         _matrix("SENSOR_OFFSET", params.sensor_offset, 3, 3),
         "",
+        *_usage_envelope(params),
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(parts))
@@ -109,7 +133,9 @@ def write_rust(table: FieldTable, params: CalibParams, blob_bytes: int, path: Pa
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("calibration", type=Path)
+    parser.add_argument(
+        "calibration", type=Path, nargs="?", default=DEFAULT_CALIBRATION
+    )
     parser.add_argument("--root", type=Path, default=Path(".."), help="repository root")
     args = parser.parse_args(argv)
 

@@ -68,7 +68,7 @@ mod protocol;
 mod sensors;
 
 use led::{LED_COUNT, Pattern};
-use protocol::{FRAME_LEN, Frame};
+use protocol::{FRAME_LEN, Frame, status};
 
 bind_interrupts!(struct UsbIrqs {
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
@@ -299,7 +299,13 @@ async fn main(spawner: Spawner) {
             counts,
             pose: estimate.map(|e| e.pose).unwrap_or_default(),
             nis: estimate.map(|e| e.nis).unwrap_or_default(),
-            status: estimate.map(|e| e.status).unwrap_or_default(),
+            // Button state is read here rather than carried through the
+            // estimator: it is not part of the estimate, and core 1 runs
+            // behind this loop, so routing it through would report presses
+            // late.
+            status: estimate.map(|e| e.status).unwrap_or_default()
+                | if buttons::left_pressed() { status::BUTTON_LEFT } else { 0 }
+                | if buttons::right_pressed() { status::BUTTON_RIGHT } else { 0 },
             progress: estimate.map(|e| e.progress).unwrap_or_default(),
         };
 

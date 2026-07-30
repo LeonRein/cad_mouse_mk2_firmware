@@ -34,7 +34,7 @@ from scipy.stats import chi2
 from .dataset import HELDOUT_SEGMENT, Run, load_session
 from .magnet import FieldTable, build_table
 from .model import MEAS_DIM, POSE_DIM, forward, forward_and_jac_vector, solve_pose
-from .params import CalibParams
+from .params import DEFAULT_CALIBRATION, CalibParams
 
 #: Process noise, as a random-walk power spectral density on the pose. Units
 #: are mm^2/s and rad^2/s, so the variance added over one step is this times dt.
@@ -301,7 +301,9 @@ def replay(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("session", type=Path)
-    parser.add_argument("calibration", type=Path)
+    parser.add_argument(
+        "calibration", type=Path, nargs="?", default=DEFAULT_CALIBRATION
+    )
     parser.add_argument("--segment", default=HELDOUT_SEGMENT)
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--q-pos", type=float, default=DEFAULT_Q_POS)

@@ -19,7 +19,24 @@ from cadmouse.calibrate import initial_params  # noqa: E402
 from cadmouse.dataset import load_session  # noqa: E402
 from cadmouse.params import CalibParams  # noqa: E402
 
-DATA = Path(__file__).resolve().parents[1] / "data" / "session1.csv"
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+#: Preferred recording, then whatever else is there.
+#:
+#: Not a hardcoded filename, because these gates check facts about the
+#: *device* -- polarity, nominal amplitude, response direction -- and any
+#: recording of it will do. Pinning one name meant the whole data-backed half
+#: of the suite went quiet the moment that file was not where it used to be,
+#: which is a silent skip rather than a failure and easy to miss.
+def _find_session() -> Path | None:
+    preferred = DATA_DIR / "session1.csv"
+    if preferred.exists():
+        return preferred
+    candidates = sorted(DATA_DIR.glob("*.csv")) if DATA_DIR.is_dir() else []
+    return candidates[0] if candidates else None
+
+
+DATA = _find_session()
 
 
 @pytest.fixture(scope="session")
@@ -52,8 +69,8 @@ def device_nominal(session):
 
 @pytest.fixture(scope="session")
 def session():
-    if not DATA.exists():
-        pytest.skip(f"no recorded session at {DATA}")
+    if DATA is None:
+        pytest.skip(f"no recorded session (*.csv) in {DATA_DIR}")
     return load_session(DATA)
 
 

@@ -34,26 +34,32 @@ pub const SENSOR_POS: [[f32; 3]; 3] = [
 
 /// Magnet centres in the knob body frame, millimetres.
 pub const MAGNET_POS: [[f32; 3]; 3] = [
-    [9.867250650e-02, -1.640842681e+01, -1.099290463e+01],
-    [-1.429958872e+01, 8.005822908e+00, -1.088243768e+01],
-    [1.355311227e+01, 8.403644225e+00, -1.048344029e+01],
+    [7.617877275e-02, -1.638668862e+01, -1.123527715e+01],
+    [-1.427923871e+01, 7.935716762e+00, -1.092709259e+01],
+    [1.356952809e+01, 8.392876733e+00, -1.045861202e+01],
 ];
 
 /// Unit magnetisation directions in the knob body frame. A reversed
 /// magnet is carried by a negative moment, not a flipped axis.
 pub const MAGNET_AXIS: [[f32; 3]; 3] = [
-    [-8.897177208e-03, -1.102608088e-01, 9.938628649e-01],
-    [-6.084473231e-02, 4.654415203e-02, 9.970614627e-01],
-    [1.291614214e-03, 5.673367989e-02, 9.983885122e-01],
+    [6.810060339e-03, -7.441064163e-02, 9.972044321e-01],
+    [-3.850478237e-02, 5.571770349e-03, 9.992428819e-01],
+    [4.105419301e-02, 4.686137121e-02, 9.980573957e-01],
 ];
 
 /// Signed magnetic moments, A*m^2. The sign is measured per device,
 /// not assumed; see `cadmouse.calibrate.detect_moment_signs`.
-pub const MAGNET_MOMENT: [f32; 3] = [7.011815328e-02, 6.784227595e-02, -6.585064653e-02];
+pub const MAGNET_MOMENT: [f32; 3] = [6.059951389e-02, 6.573072186e-02, -6.538406386e-02];
 
 /// Per-sensor offset in counts.
 pub const SENSOR_OFFSET: [[f32; 3]; 3] = [
-    [4.964851444e-01, -3.620630219e+00, -7.194835821e+00],
-    [-1.999091096e+00, 5.037680617e+00, 1.614067304e+01],
-    [8.280261191e+00, -1.257176298e+00, -7.157232757e+00],
+    [4.575466775e+00, 7.821434964e-01, 1.201295020e+01],
+    [3.607875149e-01, 3.700373915e+00, 1.768280219e+01],
+    [4.571031321e+00, -1.039052205e+00, -9.724939657e+00],
 ];
+
+/// Symmetric radius of ordinary use: translation in mm, rotation in
+/// radians, measured from the recording's `usage` segment. This sets
+/// the HID full scale -- see `shaping.rs`. `None` when the session
+/// predates the segment.
+pub const USAGE_ENVELOPE: Option<(f32, f32)> = Some((1.301772609e+00, 8.643633199e-02));

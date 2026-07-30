@@ -30,6 +30,24 @@ from .geometry import ADC_FULL_SCALE_COUNTS, CHANNEL_NAMES
 REST_SEGMENT = "rest"
 HELDOUT_SEGMENT = "free"
 
+#: Motion recorded at the amplitude the operator actually works at, as opposed
+#: to the deliberately generous excursions everywhere else.
+#:
+#: It exists because the two things a recording is asked for pull in opposite
+#: directions. The *fit* wants large excursions: magnet moment and magnet
+#: standoff are nearly degenerate, and only watching the field change over real
+#: travel separates them -- a gentle session refits the same hardware with
+#: moments 37 % different and does not generalise. The *HID sensitivity* wants
+#: the opposite: how far the knob is pushed in ordinary use, which is the one
+#: thing a deliberately hard push does not tell you.
+#:
+#: So they are recorded separately. Like ``free`` this is never fitted; unlike
+#: ``free`` it is not a test of anything, it is a measurement of the operator.
+USAGE_SEGMENT = "usage"
+
+#: Segments that carry pose information but are excluded from the fit.
+NON_FITTED_SEGMENTS = (HELDOUT_SEGMENT, USAGE_SEGMENT)
+
 #: Which pose component each motion segment was nominally exercising. Used only
 #: to aim a *weak* prior at the other five: the recording asks for one axis at a
 #: time, but the mechanism bleeds into the rest, and that bleed is a property of

@@ -33,7 +33,7 @@ from .dataset import HELDOUT_SEGMENT, load_session
 from .filter import FilterConfig, IteratedEkf
 from .magnet import build_table
 from .model import MEAS_DIM, POSE_DIM, forward, forward_and_jac_vector, solve_pose
-from .params import CalibParams
+from .params import DEFAULT_CALIBRATION, CalibParams
 
 DEFAULT_OUT = Path("crates/cadmouse-model/tests/data/golden_data.rs")
 
@@ -151,7 +151,9 @@ def build(session_path: Path, calibration: Path) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("session", type=Path)
-    parser.add_argument("calibration", type=Path)
+    parser.add_argument(
+        "calibration", type=Path, nargs="?", default=DEFAULT_CALIBRATION
+    )
     parser.add_argument("--root", type=Path, default=Path(".."), help="repository root")
     args = parser.parse_args(argv)
 

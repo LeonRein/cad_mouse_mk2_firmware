@@ -98,6 +98,16 @@ def test_status_names_cover_every_bit_the_firmware_can_set():
     all_bits = 0
     for bit, _name in record.STATUS_NAMES:
         all_bits |= bit
-    assert all_bits == 0b0011_1111
+    assert all_bits == 0b1111_1111, "the byte is now full; widening it is a wire change"
     assert record.describe_status(0) == "none"
     assert "DIVERGED" in record.describe_status(record.STATUS_DIVERGED)
+
+
+def test_either_button_advances_a_recording():
+    """`record.py` steps segments on a button, so both bits must count."""
+    for bit in (record.STATUS_BUTTON_LEFT, record.STATUS_BUTTON_RIGHT):
+        assert bit & record.STATUS_ANY_BUTTON, f"bit {bit:#04x} would be ignored"
+    # And nothing else may, or an unrelated status change would skip a segment.
+    others = [b for b, _ in record.STATUS_NAMES if not b & record.STATUS_ANY_BUTTON]
+    for bit in others:
+        assert not bit & record.STATUS_ANY_BUTTON

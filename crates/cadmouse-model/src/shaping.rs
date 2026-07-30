@@ -13,39 +13,84 @@
 //! it would show up as an axis that barely moves rather than as anything that
 //! looks like a bug.
 //!
+//! # Full scale is measured, but the sensitivity is chosen
+//!
+//! Full scale used to be two hand-tuned constants, 125 mm and 100 degrees,
+//! reached by dividing a measured envelope by fifty and by ten respectively
+//! until the device felt right. That worked, but it fused two independent
+//! things into one number: how far this particular knob gets pushed, which is
+//! measurable, and how much deflection a person wants per millimetre, which is
+//! taste. They are separate here — [`USAGE_ENVELOPE`](crate::generated) comes
+//! from the calibration, [`USAGE_FRACTION_OF_RANGE`] is the choice — so
+//! recalibrating never silently changes the feel, and changing the feel is one
+//! obvious number.
+//!
+//! The knob has **no endstop**: the restoring force simply grows until
+//! something gives. So there is no mechanical limit to normalise against, and
+//! the only well-defined envelope is behavioural — how far the operator
+//! actually moves it. That is what the `usage` segment records.
+//!
 //! # Full scale is per group, not per axis
 //!
-//! The envelope the mechanism was measured to reach is not the same on every
-//! axis: filtering the recorded free motion gives peaks of 1.24, 2.47 and
-//! 0.84 mm, and 7.6, 8.5 and 10.2 degrees. It is tempting to normalise each
-//! axis to its own peak so that every axis reaches full scale.
+//! The envelope is not the same on every axis, and it is tempting to normalise
+//! each one to its own so that every axis reaches full scale.
 //!
-//! That would be wrong. Those peaks describe *how the knob was moved during one
-//! recording*, not what the mechanism allows, and per-axis normalisation warps
-//! direction: a push at 45 degrees between two axes with different scales comes
-//! out at some other angle, and the device feels like it pulls to one side.
-//! One scale for translation and one for rotation keeps directions honest and
-//! costs only that the stiffer axes do not reach the rails.
+//! That would be wrong twice over. Those numbers describe *how the knob was
+//! moved during one recording*, not what the mechanism allows; and per-axis
+//! normalisation warps direction, because a push at 45 degrees between two axes
+//! scaled differently comes out at some other angle and the device feels like
+//! it pulls to one side. One scale for translation and one for rotation keeps
+//! directions honest and costs only that the stiffer axes do not reach the
+//! rails.
+//!
+//! The same argument rules out normalising the two *directions* of one axis
+//! separately, and there the temptation is stronger because the recorded
+//! asymmetry is large — `tz` comes out six times bigger downward. But
+//! `record.py` says "press the knob DOWN and let it rise", so that asymmetry is
+//! the instruction, not the spring. Scaling the two directions differently
+//! would make equal pushes left and right report unequal numbers.
 
+use crate::generated as consts;
 use crate::model::POSE_DIM;
 
 /// Largest value any axis reports, matching the HID report descriptor's
 /// logical maximum. Also the original firmware's `AXIS_LIMIT`.
 pub const AXIS_LIMIT: f32 = 350.0;
 
+/// What fraction of the axis range ordinary use should reach.
+///
+/// This is the whole sensitivity choice, and separating it from the measured
+/// envelope is the point of the split below. The two used to be fused into one
+/// hand-tuned constant — full scale at 125 mm, arrived at by taking a measured
+/// 2.5 mm envelope and dividing by fifty by feel — which made the number
+/// impossible to reason about and tied to one particular device.
+///
+/// At 0.9, the deflection the operator reaches 99 % of the time in normal work
+/// reports 90 % of full scale. Pushing harder still resolves, up to the clamp;
+/// the knob has no endstop, so there is always more travel available and
+/// leaving headroom above "normal" matters more than reaching exactly 350.
+pub const USAGE_FRACTION_OF_RANGE: f32 = 0.9;
+
+/// Fallback envelope for a calibration recorded before the `usage` segment
+/// existed, chosen to reproduce the old hand-tuned constants exactly.
+const FALLBACK_ENVELOPE: (f32, f32) = (
+    125.0 * USAGE_FRACTION_OF_RANGE,
+    1.745 * USAGE_FRACTION_OF_RANGE,
+);
+
+const ENVELOPE: (f32, f32) = match consts::USAGE_ENVELOPE {
+    Some(e) => e,
+    None => FALLBACK_ENVELOPE,
+};
+
 /// Translation that maps to full scale, millimetres.
 ///
-/// Far larger than the mechanism's own travel, and that is the point: it sets
-/// the *sensitivity*, not the range. Started at the measured 2.5 mm envelope,
-/// which put full scale within a gentle push and made the device unusably
-/// fast, and was divided by fifty from there by hand.
-pub const TRANSLATION_FULL_SCALE_MM: f32 = 125.0;
+/// Derived, not chosen: the measured radius of ordinary use divided by the
+/// fraction of the range it should occupy.
+pub const TRANSLATION_FULL_SCALE_MM: f32 = ENVELOPE.0 / USAGE_FRACTION_OF_RANGE;
 
-/// Rotation that maps to full scale, radians (100 degrees).
-///
-/// Same story as the translation, but only a tenth as far off — the rotations
-/// needed a factor of ten where the translations needed fifty.
-pub const ROTATION_FULL_SCALE_RAD: f32 = 1.745;
+/// Rotation that maps to full scale, radians.
+pub const ROTATION_FULL_SCALE_RAD: f32 = ENVELOPE.1 / USAGE_FRACTION_OF_RANGE;
 
 /// Per-axis sign, applied last.
 ///
@@ -126,30 +171,69 @@ mod tests {
     /// The property that per-axis normalisation would have broken.
     #[test]
     fn diagonal_motion_keeps_its_direction() {
-        // A tenth of full scale is exactly 35 axis units, so the ratios below
-        // are not confused by the truncation in the final `as i16`.
         let unit = TRANSLATION_FULL_SCALE_MM / 10.0;
         let axes = to_axes(&[unit, unit, 0.0, 0.0, 0.0, 0.0]);
         assert_eq!(axes[0], axes[1], "equal push should give equal axes");
-        assert_eq!(axes[0], 35);
+        assert!((axes[0] - 35).abs() <= 1, "a tenth of full scale: {}", axes[0]);
 
-        // And a 2:1 push stays 2:1.
+        // And a 2:1 push stays 2:1, to within the final truncation.
         let axes = to_axes(&[2.0 * unit, unit, 0.0, 0.0, 0.0, 0.0]);
-        assert_eq!(axes[0], 2 * axes[1]);
+        assert!(
+            (axes[0] - 2 * axes[1]).abs() <= 1,
+            "2:1 push gave {}:{}",
+            axes[0],
+            axes[1]
+        );
     }
 
-    /// What the chosen sensitivity actually leaves to work with.
+    /// Ordinary use lands where the sensitivity says it should.
     ///
-    /// Pinned as a test rather than left as a comment because it is the cost
-    /// of the sensitivity choice: full scale sits far outside the mechanism,
-    /// so the knob's real travel only reaches a small part of the axis range,
-    /// and the reports are correspondingly coarse.
+    /// This is the property the whole split exists to guarantee: whatever the
+    /// calibration measured as the edge of normal movement must report
+    /// [`USAGE_FRACTION_OF_RANGE`] of full scale. It holds for a measured
+    /// envelope and for the fallback alike, so it does not need updating when
+    /// a device is recalibrated.
     #[test]
-    fn the_mechanisms_own_travel_reaches_only_part_of_the_range() {
-        // Measured envelope: 2.5 mm and about 10 degrees.
-        let axes = to_axes(&[2.5, 0.0, 0.0, 0.1745, 0.0, 0.0]);
-        assert_eq!(axes[0], 7, "2.5 mm of travel");
-        assert_eq!(axes[3], 35, "10 degrees of travel");
+    fn ordinary_use_reaches_the_intended_fraction_of_the_range() {
+        // Within one unit, because the last step is a truncating `as i16` and
+        // the full scale is no longer a round number.
+        let expected = (USAGE_FRACTION_OF_RANGE * AXIS_LIMIT) as i16;
+        let t = TRANSLATION_FULL_SCALE_MM * USAGE_FRACTION_OF_RANGE;
+        let r = ROTATION_FULL_SCALE_RAD * USAGE_FRACTION_OF_RANGE;
+        let axes = to_axes(&[t, 0.0, 0.0, r, 0.0, 0.0]);
+        assert!(
+            (axes[0] - expected).abs() <= 1,
+            "translation at the edge of ordinary use: {} vs {expected}",
+            axes[0]
+        );
+        assert!(
+            (axes[3] - expected).abs() <= 1,
+            "rotation at the edge of ordinary use: {} vs {expected}",
+            axes[3]
+        );
+    }
+
+    /// There is headroom above ordinary use, because the knob has no endstop.
+    ///
+    /// Pushing harder than normal must keep resolving rather than sitting on
+    /// the clamp, or the device would feel like it hits a wall that the
+    /// mechanism does not actually have.
+    #[test]
+    fn pushing_harder_than_usual_still_resolves() {
+        let hard = 1.1 * TRANSLATION_FULL_SCALE_MM * USAGE_FRACTION_OF_RANGE;
+        let axes = to_axes(&[hard, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let usual = (USAGE_FRACTION_OF_RANGE * AXIS_LIMIT) as i16;
+        assert!(axes[0] > usual, "harder push must report more");
+        assert!(axes[0] <= AXIS_LIMIT as i16, "and still be clamped");
+    }
+
+    /// A calibration with no `usage` segment must not change the feel.
+    #[test]
+    fn the_fallback_reproduces_the_old_hand_tuned_constants() {
+        if crate::generated::USAGE_ENVELOPE.is_none() {
+            assert!((TRANSLATION_FULL_SCALE_MM - 125.0).abs() < 1e-3);
+            assert!((ROTATION_FULL_SCALE_RAD - 1.745).abs() < 1e-4);
+        }
     }
 
     #[test]

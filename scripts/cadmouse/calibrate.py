@@ -36,7 +36,15 @@ import numpy as np
 from scipy import sparse
 from scipy.optimize import least_squares
 
-from .dataset import HELDOUT_SEGMENT, REST_SEGMENT, Frame, Session, load_session
+from .dataset import (
+    HELDOUT_SEGMENT,
+    NON_FITTED_SEGMENTS,
+    REST_SEGMENT,
+    USAGE_SEGMENT,
+    Frame,
+    Session,
+    load_session,
+)
 from .geometry import MOMENT_N35
 from .magnet import FieldTable, build_table
 from .model import (
@@ -48,7 +56,7 @@ from .model import (
     pose_jacobian_batch,
     solve_pose,
 )
-from .params import N_PARAMS, CalibParams
+from .params import DEFAULT_CALIBRATION, N_PARAMS, CalibParams
 
 #: Prior widths, one per block of :meth:`CalibParams.pack`. These are
 #: regularisers, not constraints: they keep the fit from wandering into
@@ -199,7 +207,7 @@ def build_problem(
     frames = [
         f
         for f in session.decimate(per_segment=per_segment, per_rest_run=per_rest_run)
-        if f.segment != HELDOUT_SEGMENT
+        if f.segment not in NON_FITTED_SEGMENTS
     ]
     sigma = session.noise_sigma()
 
@@ -553,6 +561,57 @@ def score_heldout(
 
 
 # --------------------------------------------------------------------------
+# Usage envelope
+# --------------------------------------------------------------------------
+
+#: Percentile of |deflection| taken as the edge of ordinary use. Not the max:
+#: the tail of a hand-recorded segment is a flinch, and one flinch should not
+#: halve the sensitivity of the finished device.
+USAGE_PERCENTILE = 99.0
+
+
+def measure_usage_envelope(
+    session: Session,
+    params: CalibParams,
+    table: FieldTable,
+    per_segment: int = 400,
+) -> tuple[float, float] | None:
+    """Symmetric translation and rotation radius of ordinary use, or ``None``.
+
+    Returns one number per group rather than one per axis, and takes the
+    absolute value rather than a signed range. Both are deliberate:
+
+    * **Per group**, because per-axis normalisation warps direction -- a push at
+      45 degrees between two axes scaled differently comes out at some other
+      angle. The stiffer axes reaching less of the range is the accepted cost;
+      see ``shaping.rs``.
+    * **Symmetric**, because the asymmetry a recording shows is the operator's,
+      not the mechanism's. ``record.py`` says "press the knob DOWN and let it
+      rise", and sure enough ``tz`` comes out six times larger downward. Scaling
+      the two directions differently would bake that instruction into how the
+      finished device feels, and make equal pushes left and right report
+      unequal numbers.
+    """
+    frames = [
+        f for f in session.decimate(per_segment=per_segment) if f.segment == USAGE_SEGMENT
+    ]
+    if not frames:
+        return None
+
+    sigma = session.noise_sigma()
+    poses = np.zeros((len(frames), POSE_DIM))
+    previous = np.zeros(POSE_DIM)
+    for k, frame in enumerate(frames):
+        poses[k], _ = solve_pose(
+            frame.counts, params, table, initial=previous, sigma=sigma
+        )
+        previous = poses[k]
+
+    radius = np.percentile(np.abs(poses), USAGE_PERCENTILE, axis=0)
+    return float(radius[:3].max()), float(radius[3:].max())
+
+
+# --------------------------------------------------------------------------
 # Top level
 # --------------------------------------------------------------------------
 
@@ -614,10 +673,13 @@ def fit(
     )
 
     params, poses, _ = _split(problem, result.x)
+    params.usage_envelope = measure_usage_envelope(session, params, table, per_segment)
     seconds = time.perf_counter() - start
 
     scores = []
-    for segment in [REST_SEGMENT] + [s for s in session.segments if s not in (REST_SEGMENT, HELDOUT_SEGMENT)]:
+    for segment in [REST_SEGMENT] + [
+        s for s in session.segments if s not in (REST_SEGMENT, *NON_FITTED_SEGMENTS)
+    ]:
         picks = [i for i, f in enumerate(problem.frames) if f.segment == segment]
         if picks:
             scores.append(
@@ -648,7 +710,7 @@ def fit(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("session", type=Path, help="recorded CSV")
-    parser.add_argument("-o", "--output", type=Path, default=Path("calibration.json"))
+    parser.add_argument("-o", "--output", type=Path, default=DEFAULT_CALIBRATION)
     parser.add_argument("--per-segment", type=int, default=400)
     parser.add_argument("--per-rest-run", type=int, default=150)
     parser.add_argument("--max-nfev", type=int, default=400)
@@ -672,6 +734,20 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print(result.summary())
     print(f"\nfitted in {result.seconds:.1f} s, {result.n_eval} evaluations")
+    envelope = result.params.usage_envelope
+    if envelope is None:
+        print(
+            f"\nno '{USAGE_SEGMENT}' segment in this recording, so HID full scale "
+            "will keep the firmware's built-in default.\n"
+            "Re-record to set the sensitivity from how you actually use the knob."
+        )
+    else:
+        print(
+            f"\nusage envelope (p{USAGE_PERCENTILE:.0f} of |deflection|): "
+            f"{envelope[0]:.3f} mm, {np.rad2deg(envelope[1]):.2f} deg "
+            "-> HID full scale"
+        )
+
     print("magnet moments  ", np.array2string(result.params.magnet_moment, precision=4))
     print("magnet positions", np.array2string(result.params.magnet_pos, precision=3))
     print("sensor offsets  ", np.array2string(result.params.sensor_offset, precision=1))

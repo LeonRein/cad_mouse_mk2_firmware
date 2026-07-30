@@ -457,10 +457,26 @@ Two consequences worth carrying forward:
 
 ### Where that leaves the rate
 
-At 106 830 cycles a step is 0.71 ms, so the filter sustains about **1400 Hz**,
-up from ~910 Hz before the relocation. The readout runs at 2000-2235 Hz, so
-core 1 still does not see every sample, and the host sees no loss because
-dropping is the designed behaviour rather than a failure. What is left:
+At 106 830 cycles a step is 0.71 ms, so the *benchmark* says the filter should
+sustain about 1400 Hz, up from ~910 Hz before the relocation.
+
+**On the device it runs at about 800 Hz**, and the difference is the point of
+the warning above. Measured 2026-07-30 on the release build, from the stream
+itself rather than from a benchmark: core 0 delivers frames at 2053 Hz as the
+host sees them (the device's own log says 2264 Hz), and the estimate carried in
+those frames changes once every 2.56 frames, so core 1 completes a step at
+roughly **800 Hz**. The `dev_*` columns in a recording are a *held* value
+resampled at core 0's rate — 61 % of consecutive frames repeat the previous
+estimate — which is worth knowing before treating them as per-frame data.
+
+The 1.75x between benchmark and device is task overhead and inter-core
+contention, not the model: `bench_forward` runs `filter_step` in a tight loop
+with everything hot, while the real task waits on a `Signal`, applies the
+deadzone, publishes to a shared cell, and shares SRAM with core 0's sensor
+loop. To measure it, read the stream; the benchmark cannot see any of that.
+
+The readout at ~2 kHz therefore still outruns core 1, and the host sees no loss
+because dropping is the designed behaviour rather than a failure. What is left:
 
 1. **Drop to one relinearisation pass.** The marginal iteration measures 76 223
    cycles with the code in flash, so roughly 41 000 in RAM — which would put a

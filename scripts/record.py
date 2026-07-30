@@ -76,6 +76,11 @@ STATUS_CALIBRATING = 1 << 2
 STATUS_CALIBRATION_ABORTED = 1 << 3
 STATUS_DIVERGED = 1 << 4
 STATUS_IN_DEADZONE = 1 << 5
+STATUS_BUTTON_LEFT = 1 << 6
+STATUS_BUTTON_RIGHT = 1 << 7
+
+#: Either button, for "the operator wants to continue".
+STATUS_ANY_BUTTON = STATUS_BUTTON_LEFT | STATUS_BUTTON_RIGHT
 
 STATUS_NAMES = [
     (STATUS_FILTER_VALID, "valid"),
@@ -84,6 +89,8 @@ STATUS_NAMES = [
     (STATUS_CALIBRATION_ABORTED, "cal-aborted"),
     (STATUS_DIVERGED, "DIVERGED"),
     (STATUS_IN_DEADZONE, "at-rest"),
+    (STATUS_BUTTON_LEFT, "btn-L"),
+    (STATUS_BUTTON_RIGHT, "btn-R"),
 ]
 
 
@@ -117,8 +124,14 @@ DEVICE_POSE_COLUMNS = [
 ADC_FULL_SCALE_COUNTS = 2047
 
 #: Segment labels with meaning beyond "this was the axis I asked for".
+#: Recordings land here unless the path given has a directory of its own.
+#: Mirrors `cadmouse.params.DEFAULT_CALIBRATION_DIR` for the derived artefact;
+#: kept as a literal because this script deliberately imports nothing shared.
+DEFAULT_DATA_DIR = Path("data")
+
 REST_SEGMENT = "rest"
 HELDOUT_SEGMENT = "free"
+USAGE_SEGMENT = "usage"
 
 #: (label, seconds, instruction). Every sweep is bracketed by a rest block: they
 #: pin the pose origin, and interleaving them spreads any slow bias drift across
@@ -140,8 +153,18 @@ DEFAULT_PLAN: list[tuple[str, float, str]] = [
     (
         HELDOUT_SEGMENT,
         20.0,
-        "Move the knob however you like -- all six axes, mixed. "
-        "This block is NEVER fitted; it is the honest test of the model.",
+        "Move the knob however you like -- all six axes, mixed, and do use "
+        "its full travel. This block is NEVER fitted; it is the honest test "
+        "of the model, so it has to visit poses the fit did not.",
+    ),
+    (REST_SEGMENT, 2.0, "Hands off."),
+    (
+        USAGE_SEGMENT,
+        15.0,
+        "Now use the knob as you actually would when working -- normal, "
+        "comfortable movements, NOT full travel. This block sets how far the "
+        "knob has to move for a full-scale HID report, so move it the way you "
+        "want the finished mouse to feel.",
     ),
     (REST_SEGMENT, 2.0, "Hands off. Done after this."),
 ]
@@ -295,9 +318,76 @@ def read_frames(
                 yield frame, stats
 
 
-def _prompt(message: str) -> None:
+def _prompt(message: str, port: str | None = None) -> None:
+    """Wait for the operator, on the keyboard or on the device's own buttons.
+
+    The buttons matter more than they look. The hand is already on the knob,
+    and reaching for the keyboard between segments is exactly the moment the
+    knob gets nudged -- so the least disturbing way to say "ready" is a button
+    that is already under a finger.
+
+    Falls back to Enter alone if the device cannot be opened, so a recording
+    can still be driven from the keyboard, and if the firmware predates the
+    button status bits (they will simply never be set).
+    """
     print(f"\n>>> {message}")
-    input("    Press Enter when ready...")
+
+    try:
+        import select
+
+        import serial
+    except ImportError:
+        input("    Press Enter when ready...")
+        return
+
+    try:
+        handle = serial.Serial(port or find_port(), baudrate=115200, timeout=0)
+    except Exception:
+        input("    Press Enter when ready...")
+        return
+
+    print("    Press Enter, or a button on the mouse, when ready...", end="", flush=True)
+    decoder = FrameDecoder()
+    # A button already down when we arrive here must not count: the operator is
+    # still finishing the *previous* press. Wait for a release first.
+    armed = False
+    try:
+        handle.reset_input_buffer()
+        while True:
+            ready, _, _ = select.select([sys.stdin, handle], [], [], 0.05)
+            if sys.stdin in ready:
+                sys.stdin.readline()
+                break
+            if handle in ready:
+                pending = handle.read(max(1, handle.in_waiting))
+                pressed = None
+                for frame in decoder.feed(pending):
+                    pressed = bool(frame.status & STATUS_ANY_BUTTON)
+                if pressed is None:
+                    continue
+                if not pressed:
+                    armed = True
+                elif armed:
+                    # Let go before the segment starts, so the press is not
+                    # still deflecting the knob while it is being recorded.
+                    _wait_for_release(handle, decoder)
+                    break
+    finally:
+        handle.close()
+    print()
+
+
+def _wait_for_release(handle, decoder: "FrameDecoder", timeout: float = 2.0) -> None:
+    """Block until no button is down, or `timeout` passes."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pending = handle.read(max(1, handle.in_waiting))
+        if not pending:
+            time.sleep(0.005)
+            continue
+        for frame in decoder.feed(pending):
+            if not frame.status & STATUS_ANY_BUTTON:
+                return
 
 
 def check_link(port: str | None, seconds: float = 3.0) -> StreamStats:
@@ -390,7 +480,15 @@ def record_segment(
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("-o", "--output", type=Path, help="CSV to write")
+    ap.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help=(
+            f"CSV to write. A bare filename lands in {DEFAULT_DATA_DIR}/; "
+            "pass a path with a directory to put it anywhere else."
+        ),
+    )
     ap.add_argument("-p", "--port", help="serial port (default: autodetect)")
     ap.add_argument(
         "--check", action="store_true", help="report link health and exit"
@@ -410,6 +508,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.output is None:
         ap.error("--output is required unless --check is given")
 
+    # A bare filename means the data directory. Anything with a directory
+    # component is taken literally, so an explicit path still wins.
+    if args.output.parent == Path("."):
+        args.output = DEFAULT_DATA_DIR / args.output
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     print(f"Recording to {args.output} from {port}")
     print("Move SLOWLY -- several seconds per traverse.")
@@ -423,7 +526,7 @@ def main(argv: list[str] | None = None) -> int:
         # the firmware's filter against the host's after the fact.
         writer.writerow(["segment", "seq", "t_us", *CHANNEL_NAMES, *DEVICE_POSE_COLUMNS])
         for label, seconds, instruction in DEFAULT_PLAN:
-            _prompt(f"[{label}] {instruction}  ({seconds:.0f} s)")
+            _prompt(f"[{label}] {instruction}  ({seconds:.0f} s)", port)
             total += record_segment(label, seconds, port, writer)
 
     print(f"\nWrote {total} frames to {args.output}")

@@ -62,6 +62,16 @@ pub mod status {
     pub const DIVERGED: u8 = 1 << 4;
     /// Every axis is inside its deadzone, i.e. the device is reporting rest.
     pub const IN_DEADZONE: u8 = 1 << 5;
+    /// The left button is down right now.
+    ///
+    /// Raw press state rather than any gesture: `record.py` uses it to let the
+    /// operator step through a capture without reaching for the keyboard, and
+    /// the hand is already on the knob. The five-second both-buttons hold that
+    /// starts a rest calibration is unaffected -- it is timed on the device and
+    /// a tap is nowhere near it.
+    pub const BUTTON_LEFT: u8 = 1 << 6;
+    /// The right button is down right now.
+    pub const BUTTON_RIGHT: u8 = 1 << 7;
 }
 
 /// One sample as it goes on the wire.

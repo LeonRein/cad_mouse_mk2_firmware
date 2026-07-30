@@ -39,6 +39,7 @@ from pathlib import Path
 import numpy as np
 
 from cadmouse import CalibParams, build_table
+from cadmouse.params import DEFAULT_CALIBRATION
 from cadmouse.dataset import CHANNEL_NAMES
 from cadmouse.filter import FilterConfig, IteratedEkf
 from cadmouse.geometry import SENSOR_POS, rotation_from_rotvec
@@ -619,7 +620,9 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("calibration", type=Path)
+    parser.add_argument(
+        "calibration", type=Path, nargs="?", default=DEFAULT_CALIBRATION
+    )
     parser.add_argument("--replay", type=Path, help="feed a recorded CSV instead of the device")
     parser.add_argument("--speed", type=float, default=1.0, help="replay speed multiplier")
     parser.add_argument("--port", help="serial device, default is autodetected")

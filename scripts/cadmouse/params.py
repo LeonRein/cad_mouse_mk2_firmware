@@ -62,6 +62,15 @@ _BLOCKS = (
 #: Size of the packed parameter vector. Every one of them is fitted.
 N_PARAMS = sum(size for _, size in _BLOCKS)
 
+#: Where a fitted calibration lives unless told otherwise.
+#:
+#: Its own directory rather than ``data/``: recordings are inputs and this is
+#: derived from them, and keeping them apart means a ``data/*.csv`` glob cannot
+#: pick it up. Every tool that consumes a calibration defaults to this path, so
+#: the usual pipeline runs without repeating it.
+DEFAULT_CALIBRATION_DIR = Path("calibrations")
+DEFAULT_CALIBRATION = DEFAULT_CALIBRATION_DIR / "calibration.json"
+
 #: Characteristic size of each block, in its own units. Handed to the optimiser
 #: as ``x_scale`` so a millimetre of magnet position and a count of sensor
 #: offset take comparable steps; without it the moments, which are ~0.1 in SI,
@@ -88,6 +97,14 @@ class CalibParams:
     magnet_tilt: np.ndarray  # (3, 2) rad, (about body x, about body y)
     magnet_moment: np.ndarray  # (3,) A*m^2, signed
     sensor_offset: np.ndarray  # (3, 3) counts
+
+    #: How far the knob travels in ordinary use: one symmetric radius for
+    #: translation (mm) and one for rotation (rad). Not a fitted parameter and
+    #: not part of :meth:`pack` -- it is measured from the ``usage`` segment
+    #: afterwards, and it exists only to set the HID full scale. ``None`` when
+    #: the recording had no such segment, in which case the firmware keeps its
+    #: built-in default.
+    usage_envelope: tuple[float, float] | None = None
 
     @staticmethod
     def nominal() -> "CalibParams":
@@ -174,6 +191,9 @@ class CalibParams:
             "magnet_tilt_rad": self.magnet_tilt.tolist(),
             "magnet_moment_am2": self.magnet_moment.tolist(),
             "sensor_offset_counts": self.sensor_offset.tolist(),
+            "usage_envelope_mm_rad": (
+                list(self.usage_envelope) if self.usage_envelope is not None else None
+            ),
         }
 
     @staticmethod
@@ -183,10 +203,17 @@ class CalibParams:
             magnet_tilt=np.array(d["magnet_tilt_rad"], float),
             magnet_moment=np.array(d["magnet_moment_am2"], float),
             sensor_offset=np.array(d["sensor_offset_counts"], float),
+            usage_envelope=(
+                tuple(d["usage_envelope_mm_rad"])
+                if d.get("usage_envelope_mm_rad") is not None
+                else None
+            ),
         )
 
     def save(self, path: str | Path) -> None:
-        Path(path).write_text(json.dumps(self.to_dict(), indent=2) + "\n")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), indent=2) + "\n")
 
     @staticmethod
     def load(path: str | Path) -> "CalibParams":
@@ -199,4 +226,5 @@ class CalibParams:
             magnet_tilt=self.magnet_tilt.copy(),
             magnet_moment=self.magnet_moment.copy(),
             sensor_offset=self.sensor_offset.copy(),
+            usage_envelope=self.usage_envelope,
         )
