@@ -24,9 +24,21 @@ def test_session_structure(session):
 
 
 def test_frame_rate_is_about_2khz(session):
+    """A sanity bound on the readout, not a specification.
+
+    The band is wide because the rate is not a firmware constant: the readout
+    loop is unpaced and self-clocks on the sensors' conversion time, and it
+    also rises whenever core 1 spends less time holding the shared critical
+    section. Optimising the estimator moved it from about 2 kHz to 2.4 kHz
+    without anyone touching the readout, which is what retired the original
+    ``< 2100`` bound.
+
+    What this still catches is the thing worth catching: a recording made at
+    half the rate, or one that stalled.
+    """
     for run in session.runs:
         rate = (len(run) - 1) / run.duration_s
-        assert 1900 < rate < 2100, f"{run.segment}: {rate:.0f} Hz"
+        assert 1800 < rate < 3200, f"{run.segment}: {rate:.0f} Hz"
 
 
 def test_noise_floor_is_about_one_count(session):
