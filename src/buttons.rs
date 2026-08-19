@@ -120,7 +120,10 @@ pub async fn task(left: Input<'static>, right: Input<'static>) -> ! {
                     led::set(Pattern::Progress {
                         color: led::YELLOW,
                         background: led::BLUE,
-                        lit: filled(elapsed - CALIBRATION_HOLD, BOOTLOADER_HOLD - CALIBRATION_HOLD),
+                        lit: filled(
+                            elapsed - CALIBRATION_HOLD,
+                            BOOTLOADER_HOLD - CALIBRATION_HOLD,
+                        ),
                     });
                 } else {
                     led::set(Pattern::Progress {
@@ -174,7 +177,10 @@ fn filled(elapsed: Duration, span: Duration) -> u8 {
 /// This is what makes the device updatable once it is sealed and the debug
 /// probe is gone -- see `scripts/mkuf2.sh`.
 async fn enter_bootloader() -> ! {
-    defmt::info!("both buttons held {} s: rebooting into the USB bootloader", 10);
+    defmt::info!(
+        "both buttons held {} s: rebooting into the USB bootloader",
+        10
+    );
 
     // Red, and red only here: it is the one colour in the gesture that means
     // "done, let go" rather than "keep holding". Without it the last thing the
@@ -198,7 +204,9 @@ async fn enter_bootloader() -> ! {
     // assume. This is exactly what `embassy_rp`'s own private `Watchdog::
     // enable` does; it is reached through the PAC only because that method is
     // not public and the `Watchdog` lives in `main`.
-    embassy_rp::pac::WATCHDOG.ctrl().modify(|w| w.set_enable(false));
+    embassy_rp::pac::WATCHDOG
+        .ctrl()
+        .modify(|w| w.set_enable(false));
 
     // No activity LED -- the ring is not a GPIO the bootrom knows how to blink
     // -- and neither interface disabled: mass storage for dragging a UF2 on,

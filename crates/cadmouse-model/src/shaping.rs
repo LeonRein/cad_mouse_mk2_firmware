@@ -174,7 +174,11 @@ mod tests {
         let unit = TRANSLATION_FULL_SCALE_MM / 10.0;
         let axes = to_axes(&[unit, unit, 0.0, 0.0, 0.0, 0.0]);
         assert_eq!(axes[0], axes[1], "equal push should give equal axes");
-        assert!((axes[0] - 35).abs() <= 1, "a tenth of full scale: {}", axes[0]);
+        assert!(
+            (axes[0] - 35).abs() <= 1,
+            "a tenth of full scale: {}",
+            axes[0]
+        );
 
         // And a 2:1 push stays 2:1, to within the final truncation.
         let axes = to_axes(&[2.0 * unit, unit, 0.0, 0.0, 0.0, 0.0]);

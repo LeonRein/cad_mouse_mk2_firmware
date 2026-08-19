@@ -25,9 +25,7 @@
 //! be raised" but "which of the two implementations moved".
 
 use cadmouse_model::magnet::FieldTable;
-use cadmouse_model::model::{
-    MEAS_DIM, POSE_DIM, PoseModel, forward, forward_and_jac_vector,
-};
+use cadmouse_model::model::{MEAS_DIM, POSE_DIM, PoseModel, forward, forward_and_jac_vector};
 use cadmouse_model::tuning;
 use iekf::IteratedEkf;
 
@@ -163,7 +161,10 @@ fn jacobian_agrees_with_finite_differences() {
     // Three times the measured 1.5e-3, and no more. The old 2e-2 was more than
     // ten times what this comparison can resolve at its best step, which made
     // it a test that could not fail for any reason worth knowing about.
-    assert!(worst < 5e-3, "analytic jacobian disagrees with numeric: {worst}");
+    assert!(
+        worst < 5e-3,
+        "analytic jacobian disagrees with numeric: {worst}"
+    );
 }
 
 #[test]
@@ -191,7 +192,8 @@ fn filter_trajectory_matches_the_python() {
         if golden::DTS[k] > 0.0 {
             ekf.predict(golden::DTS[k]);
         }
-        ekf.update(&model, &z).expect("filter stayed positive definite");
+        ekf.update(&model, &z)
+            .expect("filter stayed positive definite");
 
         let got = ekf.state();
         for c in 0..3 {

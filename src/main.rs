@@ -477,7 +477,10 @@ async fn main(spawner: Spawner) {
                     warn!("read error #{} (sent {}): {}", errors, sent, e);
                 }
                 if consecutive_errors == ERRORS_BEFORE_FAULT && !fault_shown {
-                    warn!("{} consecutive read errors; ring to red", consecutive_errors);
+                    warn!(
+                        "{} consecutive read errors; ring to red",
+                        consecutive_errors
+                    );
                     led::set(Pattern::Solid(led::RED));
                     fault_shown = true;
                 }
@@ -538,8 +541,16 @@ async fn main(spawner: Spawner) {
             // behind this loop, so routing it through would report presses
             // late.
             status: estimate.map(|e| e.status).unwrap_or_default()
-                | if buttons::left_pressed() { status::BUTTON_LEFT } else { 0 }
-                | if buttons::right_pressed() { status::BUTTON_RIGHT } else { 0 },
+                | if buttons::left_pressed() {
+                    status::BUTTON_LEFT
+                } else {
+                    0
+                }
+                | if buttons::right_pressed() {
+                    status::BUTTON_RIGHT
+                } else {
+                    0
+                },
             progress: estimate.map(|e| e.progress).unwrap_or_default(),
         };
 

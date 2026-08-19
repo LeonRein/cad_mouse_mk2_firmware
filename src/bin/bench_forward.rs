@@ -30,9 +30,9 @@ use cadmouse_model::magnet::FieldTable;
 use cadmouse_model::model::{MEAS_DIM, POSE_DIM, Pose, PoseModel, forward, forward_and_jac};
 use cadmouse_model::tuning;
 use cortex_m::peripheral::DWT;
-use iekf::IteratedEkf;
 use defmt::info;
 use embassy_executor::Spawner;
+use iekf::IteratedEkf;
 use {defmt_rtt as _, panic_probe as _};
 
 /// Nominal system clock after `embassy_rp::init`, for turning cycles into time.
@@ -76,7 +76,11 @@ fn set_flush_to_zero(enable: bool) {
     unsafe {
         let mut fpscr: u32;
         core::arch::asm!("vmrs {}, fpscr", out(reg) fpscr);
-        fpscr = if enable { fpscr | (1 << 24) } else { fpscr & !(1 << 24) };
+        fpscr = if enable {
+            fpscr | (1 << 24)
+        } else {
+            fpscr & !(1 << 24)
+        };
         core::arch::asm!("vmsr fpscr, {}", in(reg) fpscr);
     }
 }
@@ -168,7 +172,10 @@ async fn main(_spawner: Spawner) {
     // SAFETY: single-threaded, and this is the only reference taken.
     let ram_table = FieldTable::copy_into(unsafe { &mut *core::ptr::addr_of_mut!(TABLE_RAM) });
 
-    info!("--- measurement function, {=usize} poses x {=usize} reps ---", N_POSES, N_REPS);
+    info!(
+        "--- measurement function, {=usize} poses x {=usize} reps ---",
+        N_POSES, N_REPS
+    );
 
     let calls = N_POSES * N_REPS;
 
@@ -257,9 +264,7 @@ async fn main(_spawner: Spawner) {
         let total = cycles(|| {
             for _ in 0..N_REPS {
                 for pose in poses.iter() {
-                    core::hint::black_box(
-                        model.predict_and_jacobian(core::hint::black_box(pose)),
-                    );
+                    core::hint::black_box(model.predict_and_jacobian(core::hint::black_box(pose)));
                 }
             }
         });
@@ -384,7 +389,11 @@ async fn main(_spawner: Spawner) {
                 }
             }
         });
-        report("filter only, no model (1 iteration), CODE IN RAM", total, calls);
+        report(
+            "filter only, no model (1 iteration), CODE IN RAM",
+            total,
+            calls,
+        );
     }
 
     // The same step, but with the code itself in SRAM instead of executing
@@ -467,11 +476,12 @@ async fn main(_spawner: Spawner) {
         let total = cycles(|| {
             for _ in 0..N_REPS {
                 for _ in 0..N_POSES {
-                    core::hint::black_box(linalg::matmul_transpose::<
-                        MEAS_DIM,
-                        POSE_DIM,
-                        MEAS_DIM,
-                    >(core::hint::black_box(&jp), &jac));
+                    core::hint::black_box(
+                        linalg::matmul_transpose::<MEAS_DIM, POSE_DIM, MEAS_DIM>(
+                            core::hint::black_box(&jp),
+                            &jac,
+                        ),
+                    );
                 }
             }
         });
@@ -492,10 +502,10 @@ async fn main(_spawner: Spawner) {
         let total = cycles(|| {
             for _ in 0..N_REPS {
                 for _ in 0..N_POSES {
-                    core::hint::black_box(linalg::cholesky_solve_mat_transposed::<MEAS_DIM, POSE_DIM>(
-                        core::hint::black_box(&chol),
-                        &jp,
-                    ));
+                    core::hint::black_box(linalg::cholesky_solve_mat_transposed::<
+                        MEAS_DIM,
+                        POSE_DIM,
+                    >(core::hint::black_box(&chol), &jp));
                 }
             }
         });
@@ -518,7 +528,10 @@ async fn main(_spawner: Spawner) {
             worst = d;
         }
     }
-    info!("flash vs RAM table agreement: {=f32} counts (must be 0)", worst);
+    info!(
+        "flash vs RAM table agreement: {=f32} counts (must be 0)",
+        worst
+    );
 
     info!("--- done ---");
     loop {

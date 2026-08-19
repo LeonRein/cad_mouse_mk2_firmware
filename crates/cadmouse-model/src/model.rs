@@ -15,7 +15,7 @@
 //! differentiating Rodrigues' formula.
 
 use crate::generated as consts;
-use crate::magnet::{sqrtf, FieldTable};
+use crate::magnet::{FieldTable, sqrtf};
 
 pub const N_SENSORS: usize = 3;
 pub const N_MAGNETS: usize = 3;
@@ -163,7 +163,11 @@ fn field_and_grad(
     // On axis the radial field is zero by symmetry, so the direction being
     // undefined there is harmless as long as it is finite.
     let inv_rho = if rho > 1e-9 { 1.0 / rho } else { 0.0 };
-    let e = [radial[0] * inv_rho, radial[1] * inv_rho, radial[2] * inv_rho];
+    let e = [
+        radial[0] * inv_rho,
+        radial[1] * inv_rho,
+        radial[2] * inv_rho,
+    ];
 
     let s = table.sample(rho, zc);
     let b = [
@@ -421,11 +425,7 @@ impl iekf::MeasurementModel<POSE_DIM, MEAS_DIM> for PoseModel<'_> {
 
 #[inline]
 fn skew(v: &[f32; 3]) -> [[f32; 3]; 3] {
-    [
-        [0.0, -v[2], v[1]],
-        [v[2], 0.0, -v[0]],
-        [-v[1], v[0], 0.0],
-    ]
+    [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]]
 }
 
 #[inline]

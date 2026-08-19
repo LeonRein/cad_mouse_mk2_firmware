@@ -57,7 +57,10 @@ pub enum Pattern {
     /// Every pixel the same colour.
     Solid(RGB8),
     /// All pixels on and off together, `period_ms` for a full cycle.
-    Blink { color: RGB8, period_ms: u32 },
+    Blink {
+        color: RGB8,
+        period_ms: u32,
+    },
     /// One lit pixel walking around the ring. The calibration indicator.
     Spinner(RGB8),
     /// The first `lit` pixels in `color`, the rest left showing `background`

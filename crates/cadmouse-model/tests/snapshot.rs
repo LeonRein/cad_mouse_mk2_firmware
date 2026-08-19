@@ -9,9 +9,7 @@
 //!         -p cadmouse-model --test snapshot -- --nocapture
 
 use cadmouse_model::magnet::FieldTable;
-use cadmouse_model::model::{
-    forward, forward_and_jac_vector, MEAS_DIM, POSE_DIM, Pose, PoseModel,
-};
+use cadmouse_model::model::{MEAS_DIM, POSE_DIM, Pose, PoseModel, forward, forward_and_jac_vector};
 use cadmouse_model::tuning;
 use iekf::IteratedEkf;
 use std::fmt::Write as _;
@@ -105,7 +103,8 @@ fn render() -> String {
         }
 
         ekf.predict(DT);
-        ekf.update(&model, &z).expect("filter stayed positive definite");
+        ekf.update(&model, &z)
+            .expect("filter stayed positive definite");
         for v in ekf.state() {
             writeln!(s, "x {v:.6e}").unwrap();
         }
@@ -129,8 +128,7 @@ fn behaviour_is_unchanged() {
         println!("wrote {} lines to {PATH}", got.lines().count());
         return;
     }
-    let want = std::fs::read_to_string(PATH)
-        .expect("no snapshot; run once with SNAPSHOT_WRITE=1");
+    let want = std::fs::read_to_string(PATH).expect("no snapshot; run once with SNAPSHOT_WRITE=1");
 
     // Mixed absolute/relative, per quantity: "relative" is meaningless next to
     // zero and these span twelve orders of magnitude. The absolute floor is in
@@ -142,22 +140,22 @@ fn behaviour_is_unchanged() {
     // these budgets are for. What they must catch is a *wrong* answer.
     fn tolerance(tag: u8) -> (f64, f64) {
         match tag {
-            b'f' | b'c' => (1e-5, 1e-3),  // counts
+            b'f' | b'c' => (1e-5, 1e-3), // counts
             // The table's derivative terms carry a cancellation in the cubic
             // derivative weights, so an f32 bicubic is only good to about
             // 1e-3 relative against an f64 evaluation of the same stencil --
             // measured, over 4000 random points, for both the per-point and
             // the separable summation order. A budget tighter than that is
             // measuring the summation order, not the answer.
-            b'j' => (2e-3, 1e-3),         // counts per mm / per rad
-            b'x' => (1e-4, 1e-6),         // pose: mm and rad
-            b'n' => (1e-3, 1e-4),         // NIS, dimensionless
+            b'j' => (2e-3, 1e-3), // counts per mm / per rad
+            b'x' => (1e-4, 1e-6), // pose: mm and rad
+            b'n' => (1e-3, 1e-4), // NIS, dimensionless
             // Loosest, deliberately. The covariance is a second-order
             // quantity -- it steers the gain, it is not reported to anyone --
             // and it integrates every rounding change in the Jacobian over the
             // whole run. The pose budget above is the one that constrains what
             // the device actually outputs.
-            b'p' => (1e-2, 1e-15),        // covariance: mm^2 and rad^2
+            b'p' => (1e-2, 1e-15), // covariance: mm^2 and rad^2
             _ => panic!("unknown tag {tag}"),
         }
     }

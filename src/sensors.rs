@@ -1,11 +1,11 @@
 use defmt::{info, warn};
-use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_embedded_hal::shared_bus::I2cDeviceError;
+use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_rp::gpio::Output;
 use embassy_rp::i2c::{Async, Error as RpI2cError, I2c, Instance as I2cInstance};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{with_timeout, Delay, Duration};
+use embassy_time::{Delay, Duration, with_timeout};
 use embedded_hal_async::i2c::I2c as _;
 use tli493d::{
     A2B6, A2B6Sensitivity, AddressSlot, BxByBz, PowerMode, RawReading, Tli493d, TriggerMode,
@@ -101,8 +101,22 @@ impl<T: I2cInstance + 'static> Sensors<T> {
         // Bring each sensor up one at a time: each powers on at the default
         // address A0, then (except MAG3) is moved to a distinct slot before the
         // next one is powered on, so they don't collide on the shared bus.
-        let mag1 = bring_up(bus, &mut delay, &mut mag1_pwr, Some(AddressSlot::A2), "MAG1").await?;
-        let mag2 = bring_up(bus, &mut delay, &mut mag2_pwr, Some(AddressSlot::A1), "MAG2").await?;
+        let mag1 = bring_up(
+            bus,
+            &mut delay,
+            &mut mag1_pwr,
+            Some(AddressSlot::A2),
+            "MAG1",
+        )
+        .await?;
+        let mag2 = bring_up(
+            bus,
+            &mut delay,
+            &mut mag2_pwr,
+            Some(AddressSlot::A1),
+            "MAG2",
+        )
+        .await?;
         let mag3 = bring_up(bus, &mut delay, &mut mag3_pwr, None, "MAG3").await?;
 
         info!("Sensors ready");
@@ -237,7 +251,11 @@ async fn bring_up<T: I2cInstance + 'static>(
             // with it. Expect PD0 (0x04) set on a healthy frame.
             info!("{}: primed, DIAG=0x{:02x}", label, sensor.diagnostics().raw);
         }
-        Ok(Err(e)) => warn!("{}: priming read failed: {}", label, defmt::Debug2Format(&e)),
+        Ok(Err(e)) => warn!(
+            "{}: priming read failed: {}",
+            label,
+            defmt::Debug2Format(&e)
+        ),
         Err(_) => warn!(
             "{}: priming read timed out — clock stretching may not be working",
             label
