@@ -8,6 +8,11 @@ license = "MIT"
 repository = "https://github.com/LeonRein/cad_mouse_mk2_firmware"
 resolver = "2"
 
+# So that `cargo run --release` means the firmware. Without it cargo refuses to
+# choose between this and `bench_forward`, which is the wrong default: the
+# benchmark is the special case.
+default-run = "cad-mouse-mk2-firmware"
+
 # Two library crates, split along the line of what is reusable:
 #
 #   crates/iekf            general-purpose filter, knows nothing about magnets
