@@ -96,11 +96,17 @@ pub const ROTATION_FULL_SCALE_RAD: f32 = ENVELOPE.1 / USAGE_FRACTION_OF_RANGE;
 ///
 /// The estimator works in the board frame — `+x` right, `+y` toward the rear,
 /// `+z` up, rotations by the right-hand rule — and an application consuming
-/// six HID axes has its own idea of which way is which. These start at `+1`
-/// because the board frame and the usual multi-axis convention agree on paper;
-/// **that is a hypothesis, not a measurement**, and the only way to settle it
-/// is to push the knob and watch the model on screen. Flip the entry that goes
-/// the wrong way.
+/// six HID axes has its own idea of which way is which.
+///
+/// All `+1` is **confirmed on hardware**: every axis moves the model the right
+/// way in FreeCAD and in Onshape, with no inversion configured anywhere. One
+/// qualifier, because it is easy to read as a stronger claim than it is — that
+/// was measured through `spacenavd` with `swap-yz = true` set in `spnavrc`, so
+/// what is verified is *this firmware together with that setting*, not the raw
+/// HID frame standing alone. A host reading the device directly (3DxWare,
+/// WebHID, hidraw) sees an unswapped frame and may need different signs.
+///
+/// If an axis ever goes the wrong way, flip its entry here.
 pub const AXIS_SIGN: [f32; POSE_DIM] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
 /// Convert an estimated pose to the six axis values the HID report carries.

@@ -27,10 +27,17 @@
 //!
 //! # Rate
 //!
-//! `poll_ms = 1`, so the host asks for a report every millisecond at full
-//! speed — 1 kHz, independent of both the sensor readout and the filter.
-//! Reports go out only when a value has actually changed, which is what the
-//! original did and which keeps an idle device silent on the bus.
+//! Two separate numbers, and confusing them is easy. `poll_ms = 1` is the
+//! endpoint interval — how often the host *asks*. [`REPORT_INTERVAL_MS`] is how
+//! often this task has anything new to give it, and that is the one that
+//! decides how the device feels. See its docs for the choice.
+//!
+//! Reports go out only when a value has actually changed, which keeps an idle
+//! device silent on the bus. On Linux that is indistinguishable from a retail
+//! device's continuous stream: the input core drops an `EV_ABS` event whose
+//! value did not change, so a held deflection produces nothing either way. The
+//! one place the difference bites is the return to rest — see
+//! [`ZERO_REPEATS`].
 
 use cadmouse_model::shaping;
 use defmt::info;
@@ -88,11 +95,53 @@ pub const REPORT_DESCRIPTOR: &[u8] = &[
     0xC0,              // END_COLLECTION
 ];
 
-/// How often the report is rebuilt and compared against the last one sent.
+/// Milliseconds between axis reports. **The one number to change.**
 ///
-/// Matched to the host's 1 ms polling. Faster would only produce reports the
-/// host has no slot to collect.
-const TICK: Duration = Duration::from_millis(1);
+/// Two settings make sense, and which is right depends on the host rather than
+/// on anything measurable here, so it is one named constant rather than
+/// something derived:
+///
+/// * **8** — what a retail 3Dconnexion device does: roughly 125 packets per
+///   second while the knob is displaced. Host software that advances the view
+///   once per *event* rather than per unit of elapsed time is tuned against
+///   that cadence, and more of it works that way than you would guess:
+///   FreeCAD's `pollSpacenav` runs off a `QSocketNotifier`, so at any rate its
+///   event loop can service it steps the camera once per event.
+/// * **1** — a report at every host poll. Eight times the traffic, and less
+///   quantisation on the report's own latency. Per-event consumers then run
+///   proportionally fast, corrected by scaling the host's sensitivity and
+///   changing nothing else.
+///
+/// **The ratio between the two is not the tick ratio.** Reports go out only on
+/// change, and at 1 ms the estimate frequently has not moved since the last
+/// tick, so ticks are skipped. Measured on this device through `spacenavd`:
+///
+/// | tick | nominal | measured | duty |
+/// |------|---------|----------|------|
+/// | 1 ms | 1000 Hz |   830 Hz | 83 % |
+/// | 8 ms |  125 Hz |   122 Hz | 98 % |
+///
+/// Eight times more change accumulates per tick at 8 ms, so almost no tick is
+/// wasted. The real factor between the two settings is therefore about **6.8**,
+/// not 8 — and 1 ms spends a fifth of its bandwidth on reports that say nothing
+/// new. Measure with `spacenav-ws measure-rate` rather than assuming either.
+///
+/// Eight by default: a device that needs the host reconfigured before it feels
+/// right is a device that feels broken on the first machine it meets.
+pub const REPORT_INTERVAL_MS: u64 = 8;
+
+/// How often the report is rebuilt and compared against the last one sent.
+const TICK: Duration = Duration::from_millis(REPORT_INTERVAL_MS);
+
+/// How many times the all-zero axis report is sent when the knob returns to
+/// rest.
+///
+/// A retail device sends three, and the reason is worth keeping: every other
+/// report is a correction that the next one supersedes, but the report saying
+/// "stopped" has nothing behind it. Lose it and the host goes on applying the
+/// last non-zero value forever — a view that creeps on its own, which is the
+/// exact failure the `CALIBRATED` gate below already exists to avoid.
+const ZERO_REPEATS: u8 = 3;
 
 /// Sends axis and button reports, on change.
 #[embassy_executor::task]
@@ -102,6 +151,9 @@ pub async fn task(mut writer: HidWriter<'static, Driver<'static, USB>, MAX_PACKE
     let mut ticker = Ticker::every(TICK);
     let mut last_axes = [0i16; 6];
     let mut last_buttons = 0u16;
+    // Zero reports still owed, counting down. Starts at nothing: an idle
+    // device that has never moved has no rest to announce.
+    let mut zero_repeats = 0u8;
 
     loop {
         ticker.next().await;
@@ -119,14 +171,26 @@ pub async fn task(mut writer: HidWriter<'static, Driver<'static, USB>, MAX_PACKE
 
         let buttons = (buttons::left_pressed() as u16) | ((buttons::right_pressed() as u16) << 1);
 
-        if axes != last_axes {
+        let changed = axes != last_axes;
+        if changed || zero_repeats > 0 {
             let mut report = [0u8; 13];
             report[0] = REPORT_ID_AXES;
             for (i, &v) in axes.iter().enumerate() {
                 report[1 + i * 2..3 + i * 2].copy_from_slice(&v.to_le_bytes());
             }
+            // Only on success, so a refused write is simply retried next tick
+            // rather than counting as one of the three.
             if writer.write(&report).await.is_ok() {
                 last_axes = axes;
+                zero_repeats = if !changed {
+                    zero_repeats - 1
+                } else if axes == [0i16; 6] {
+                    // This send was the first of the three.
+                    ZERO_REPEATS - 1
+                } else {
+                    // Moving again; whatever was owed is moot.
+                    0
+                };
             }
         }
 
