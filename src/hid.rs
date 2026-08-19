@@ -2,13 +2,12 @@
 //!
 //! # The descriptor
 //!
-//! Ported byte for byte from the original C++ firmware's
-//! `HIDController.cpp`, and deliberately not rewritten. Its exact shape is
-//! what host software recognises as a 3-D input device: a Generic Desktop
-//! *multi-axis controller*, with all six axes in one report rather than split
-//! across two. Older 3Dconnexion devices sent translation in report 1 and
-//! rotation in report 2, and host software decides which to expect; a device
-//! that gets this wrong fails in ways that look like a sign or scaling
+//! Its exact shape is dictated by what host software recognises as a 3-D
+//! input device, not by taste: a Generic Desktop *multi-axis controller*, with
+//! all six axes in one report rather than split across two. Treat it as an
+//! interface constant. Older 3Dconnexion devices sent translation in report 1
+//! and rotation in report 2, and host software decides which to expect; a
+//! device that gets this wrong fails in ways that look like a sign or scaling
 //! problem rather than a descriptor problem.
 //!
 //! # Using it on Linux

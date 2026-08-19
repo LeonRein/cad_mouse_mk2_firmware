@@ -1,8 +1,7 @@
 //! The two side buttons, and the gesture that starts a rest calibration.
 //!
-//! Both buttons are active low with the internal pull-up, matching the
-//! original firmware's `INPUT_PULLUP`. D0/GPIO26 is the right button and
-//! D2/GPIO28 the left.
+//! Both buttons are active low with the internal pull-up. D0/GPIO26 is the
+//! right button and D2/GPIO28 the left.
 //!
 //! Two things come out of here:
 //!

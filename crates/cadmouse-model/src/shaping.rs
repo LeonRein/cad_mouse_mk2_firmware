@@ -4,13 +4,13 @@
 //! becomes an arbitrary number that some application will interpret however it
 //! likes.
 //!
-//! # Why the original firmware's gains are not here
+//! # Gains from a counts-based design do not carry over
 //!
-//! `Config.h` in the C++ carried `GAIN_T = {28, 28, 24}` and
-//! `GAIN_R = {18, 18, 20}`. Those multiplied **raw magnetic deltas in counts**,
-//! which is what that firmware called a pose. Nothing here is in counts, so
-//! those numbers would be meaningless — reusing them is the obvious mistake and
-//! it would show up as an axis that barely moves rather than as anything that
+//! Worth stating because it is the obvious mistake: a design that treats the
+//! raw magnetic delta *as* the pose needs per-axis gains to turn counts into
+//! axis units. Nothing here is in counts — the estimator hands over
+//! millimetres and radians — so any such gain is meaningless here, and reusing
+//! one shows up as an axis that barely moves rather than as anything that
 //! looks like a bug.
 //!
 //! # Full scale is measured, but the sensitivity is chosen
@@ -54,7 +54,7 @@ use crate::generated as consts;
 use crate::model::POSE_DIM;
 
 /// Largest value any axis reports, matching the HID report descriptor's
-/// logical maximum. Also the original firmware's `AXIS_LIMIT`.
+/// logical maximum.
 pub const AXIS_LIMIT: f32 = 350.0;
 
 /// What fraction of the axis range ordinary use should reach.

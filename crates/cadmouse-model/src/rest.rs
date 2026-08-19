@@ -20,9 +20,9 @@
 //!   Measuring it beats assuming it, and a filter whose `R` is wrong is
 //!   dishonest about its own uncertainty in a way that is very hard to notice.
 //! * **The deadzone**, per axis, from the jitter the *filtered pose* actually
-//!   shows at rest. Note this is a deadzone on the pose, not on raw counts as
-//!   in the original firmware -- by the time the estimator has run, counts are
-//!   no longer the quantity anyone cares about.
+//!   shows at rest. Note this is a deadzone on the pose, not on raw counts --
+//!   by the time the estimator has run, counts are no longer the quantity
+//!   anyone cares about.
 //!
 //! The user is not asked to do anything, so the routine has to check for
 //! itself that the knob really was at rest; see [`MAX_REST_MOTION_MM`].
@@ -224,11 +224,11 @@ impl RestCalibration {
 
 /// Per-axis deadzone with hysteresis.
 ///
-/// Hysteresis rather than the original firmware's hard threshold. A hard
-/// threshold chatters: a pose sitting exactly at the boundary flips between
-/// zero and not-zero every frame, which downstream reads as a very fast, very
-/// small oscillation. Leaving the zero requires exceeding the threshold by
-/// half again, so the boundary can only be crossed decisively.
+/// Hysteresis rather than a hard threshold. A hard threshold chatters: a pose
+/// sitting exactly at the boundary flips between zero and not-zero every
+/// frame, which downstream reads as a very fast, very small oscillation.
+/// Leaving the zero requires exceeding the threshold by half again, so the
+/// boundary can only be crossed decisively.
 pub struct Deadzone {
     thresholds: [f32; POSE_DIM],
     zeroed: [bool; POSE_DIM],

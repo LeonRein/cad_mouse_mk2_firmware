@@ -32,9 +32,9 @@
 //! | MAG2 power        | D9  | 4    |
 //! | MAG1 power        | D10 | 3    |
 //!
-//! D3 is GPIO5 here and GPIO29 on the XIAO RP2040 that the original C firmware
-//! targeted. Every other D-pin maps identically between the two boards, which
-//! makes this the one entry in the table worth double-checking.
+//! D3 is GPIO5 here and GPIO29 on the XIAO RP2040. Every other D-pin maps
+//! identically between the two boards, which makes this the one entry in the
+//! table worth double-checking.
 
 #![no_std]
 #![no_main]
@@ -130,9 +130,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 ///
 /// Generous next to anything legitimate: a single readout iteration can
 /// legally block for the sensors' 10 ms read timeout on each of three sensors,
-/// plus [`USB_WRITE_TIMEOUT`] -- about 40 ms all told. Two seconds is therefore only
-/// ever reached by something genuinely wedged, and still recovers fast enough
-/// that a user reads it as a hiccup rather than a failure.
+/// plus [`USB_WRITE_TIMEOUT`] -- about 40 ms all told. Two seconds is
+/// therefore only ever reached by something genuinely wedged, and still
+/// recovers fast enough that a user reads it as a hiccup rather than a
+/// failure.
 const WATCHDOG_PERIOD: Duration = Duration::from_secs(2);
 
 /// How often core 1 is checked for progress.
@@ -272,10 +273,11 @@ async fn main(spawner: Spawner) {
 
     // pid.codes' community vendor ID with one of its test product IDs.
     //
-    // Not 3Dconnexion's `256f:c631`, which the original C++ firmware claimed
-    // so that the vendor's driver would bind to it. On Linux nothing needs
-    // that: `spacenavd` will drive any device given its ID in `/etc/spnavrc`,
-    // so there is no reason to answer to another company's name.
+    // Deliberately not 3Dconnexion's `256f:c631`. Claiming it makes the
+    // vendor's own driver bind, which is the usual reason to do it -- but on
+    // Linux nothing needs that: `spacenavd` will drive any device given its ID
+    // in `/etc/spnavrc`, so there is no reason to answer to another company's
+    // name.
     //
     // `1209:0001` is a *test* PID, fine for a personal build. A permanent one
     // is free from pid.codes for an open-source project, which is the only

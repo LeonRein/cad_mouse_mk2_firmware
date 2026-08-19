@@ -496,10 +496,10 @@ from f64 NumPy, and the flash and RAM tables agree to 0.0 counts.
 
 The device enumerates as a **Generic Desktop multi-axis controller** — six
 `int16` axes at ±350 in report 1, two buttons in report 3, polled at 1 kHz.
-The descriptor is a byte-for-byte port of the original C++ firmware's, in
-`src/hid.rs`, and it must stay that way: host software decides what to expect
-from a device's descriptor, and older 3-D mice split translation and rotation
-across two reports where this sends all six in one.
+The descriptor in `src/hid.rs` is an interface constant and must stay that
+way: host software decides what to expect from a device's descriptor, and
+older 3-D mice split translation and rotation across two reports where this
+sends all six in one.
 
 ### USB identity
 
@@ -507,8 +507,8 @@ across two reports where this sends all six in one.
 1209:0001   pid.codes community VID, test PID
 ```
 
-Deliberately **not** 3Dconnexion's `256f:c631`, which the original firmware
-claimed so the vendor's Windows driver would bind. On Linux nothing needs
+Deliberately **not** 3Dconnexion's `256f:c631`. Claiming it makes the vendor's
+Windows driver bind, which is the usual reason to do it; on Linux nothing needs
 that, so the device answers to its own name. `0x1209` is
 [pid.codes](https://pid.codes)' community vendor ID; `0x0001` is one of its
 test PIDs, which is fine for a personal build. A permanent PID is free for an
@@ -577,8 +577,8 @@ alone and turn the feel down downstream, where `spacenavd`'s own
 resolution. `tests/the_mechanisms_own_travel_reaches_only_part_of_the_range`
 in `shaping.rs` pins these numbers so the trade stays visible.
 
-The original firmware's `GAIN_T`/`GAIN_R` do **not** carry over — they scaled
-raw magnetic deltas in counts, and nothing here is in counts.
+Per-axis gains from a counts-based design do **not** carry over — they scale
+raw magnetic deltas, and nothing here is in counts.
 
 ## Running without a debug probe
 
@@ -629,7 +629,7 @@ changes the sample rate.
 
 ## Not done here
 
-The sleep state (the original slept after two minutes); the sequential-sampling
+A sleep state after some minutes of inactivity; the sequential-sampling
 skew between the three sensors, beyond trimming the transition frames it
 corrupts (`SETTLE_S` in `dataset.py`).
 

@@ -14,9 +14,10 @@
 //! The physical ring is eight WS2812s on D3/GPIO5, driven through PIO, with a
 //! level-shifter enable on D1/GPIO27.
 //!
-//! Note D3 is GPIO5 on the XIAO RP2350, *not* GPIO29 as on the XIAO RP2040 the
-//! original C firmware's pin table was written for. The two boards share the
-//! same D-to-GPIO mapping everywhere else; D3 was remapped.
+//! Note D3 is GPIO5 on the XIAO RP2350, *not* GPIO29 as on the XIAO RP2040.
+//! The two boards share the same D-to-GPIO mapping everywhere else; D3 was
+//! remapped, so a pin table copied from an RP2040 build is wrong in exactly
+//! one place.
 
 use core::cell::Cell;
 
@@ -29,7 +30,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use smart_leds::RGB8;
 
-/// Pixels on the ring (original firmware `Config::LED_COUNT`).
+/// Pixels on the ring.
 pub const LED_COUNT: usize = 8;
 
 /// Animation step. Fast enough that the spinner looks smooth, slow enough that
@@ -57,8 +58,7 @@ pub enum Pattern {
     Solid(RGB8),
     /// All pixels on and off together, `period_ms` for a full cycle.
     Blink { color: RGB8, period_ms: u32 },
-    /// One lit pixel walking around the ring. The calibration indicator, as in
-    /// the original firmware's `CalibratingState`.
+    /// One lit pixel walking around the ring. The calibration indicator.
     Spinner(RGB8),
     /// The first `lit` pixels in `color`, the rest left showing `background`
     /// -- a progress bar bent into a circle.

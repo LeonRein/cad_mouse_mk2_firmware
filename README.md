@@ -10,7 +10,37 @@ measures its own zero at every power-up.
 
 ---
 
-## Hardware
+## The hardware this is for
+
+[**CAD Mouse MK2**](https://github.com/sb-ocr/cad-mouse-mk2) by sb-ocr — an
+open-source design (CC BY-NC-SA 4.0) with a 3D-printed PETG spring mechanism, a
+custom PCB carrying three Hall sensors, and an enclosure. It ships its own
+C++/PlatformIO firmware; this is an independent replacement, written from
+scratch in Rust.
+
+The two share an interface, not code. The USB HID report descriptor is fixed by
+what host software expects of a 3-D controller rather than by either
+implementation, and the pin assignments follow the PCB.
+
+### One magnet per sensor, not a pair
+
+The build this is calibrated for uses **three magnets in total, one per Hall
+sensor**, where the design allows a stacked pair per position — six.
+
+This is not a configuration switch. It is baked into the field table, which is
+generated for a single 6 × 3 mm disc, and into the fitted moments in
+`generated.rs`. **If you build with stacked pairs, the shipped calibration is
+wrong for your device** and you have to run the host calibration yourself; see
+[Host calibration](#host-calibration).
+
+Worth knowing because the calibration found it before anyone opened the knob:
+the fitted moments came out at 55 % of a stacked N35 pair, which is not a
+plausible remanence spread. With the magnet height corrected to 3 mm the
+held-out residual fell from 0.886 to 0.81 counts. A fit that has to move a
+physical constant by 45 % to explain the data is reporting a hardware fact, not
+converging.
+
+## Board and pinout
 
 | function | pin | GPIO |
 |---|---|---|
