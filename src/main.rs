@@ -40,8 +40,9 @@
 #![no_main]
 
 use core::ptr::addr_of_mut;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use defmt::{info, unwrap, warn};
+use defmt::{error, info, unwrap, warn};
 use defmt_rtt as _;
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::bind_interrupts;
@@ -52,12 +53,12 @@ use embassy_rp::peripherals::{PIO0, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
+use embassy_rp::watchdog::Watchdog;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::class::hid::{Config as HidConfig, HidWriter, State as HidState};
-use panic_probe as _;
 use static_cell::StaticCell;
 
 mod buttons;
@@ -92,13 +93,80 @@ type MyUsbDevice = UsbDevice<'static, MyUsbDriver>;
 static mut CORE1_STACK: Stack<8192> = Stack::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 
+/// Halt under a debugger, reset without one.
+///
+/// `panic-probe`, which this replaces, ends every panic in `udf` -- a
+/// deliberate `HardFault` that a probe catches and turns into a backtrace.
+/// That is the right behaviour on the bench and the wrong one in a sealed
+/// enclosure, where it leaves a device that is indistinguishable from broken
+/// hardware and recovers only by being unplugged.
+///
+/// Rather than choose, ask: `C_DEBUGEN` in `DHCSR` says whether anything is
+/// attached. So the same binary breaks into the debugger during development
+/// and reboots in the field. A panic that repeats will reboot in a loop, which
+/// is visible in the LED bring-up sequence and is a far better symptom than
+/// silence.
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    static PANICKED: AtomicBool = AtomicBool::new(false);
+
+    // Both guards are taken from `panic-probe`, which handled this properly
+    // and which this replaces only to change the *ending*, not the care taken
+    // getting there: nothing else may run while a panic is being reported, and
+    // if formatting the message panics in turn, the flag stops it recursing
+    // until the stack runs out.
+    cortex_m::interrupt::disable();
+    if !PANICKED.swap(true, Ordering::Relaxed) {
+        error!("panic: {}", defmt::Display2Format(info));
+    }
+
+    if cortex_m::peripheral::DCB::is_debugger_attached() {
+        cortex_m::asm::udf();
+    }
+    cortex_m::peripheral::SCB::sys_reset()
+}
+
+/// How long either core may stop making progress before the chip resets.
+///
+/// Generous next to anything legitimate: a single readout iteration can
+/// legally block for the sensors' 10 ms read timeout on each of three sensors,
+/// plus [`USB_WRITE_TIMEOUT`] -- about 40 ms all told. Two seconds is therefore only
+/// ever reached by something genuinely wedged, and still recovers fast enough
+/// that a user reads it as a hiccup rather than a failure.
+const WATCHDOG_PERIOD: Duration = Duration::from_secs(2);
+
+/// How often core 1 is checked for progress.
+///
+/// The readout loop being alive says nothing about the estimator -- core 1 can
+/// fault or wedge while core 0 happily keeps sampling, and the only visible
+/// symptom would be a pose that never changes. Feeding the watchdog only while
+/// *both* counters advance turns it into a liveness check on the pair.
+const CORE1_LIVENESS_WINDOW: Duration = Duration::from_millis(200);
+
+/// Consecutive failed reads before the ring is turned red.
+///
+/// The watchdog deliberately keeps being fed while reads are merely failing:
+/// resetting would not fix a disconnected sensor and would produce a reboot
+/// loop instead of a diagnosis. So failure needs its own signal, and at the
+/// 1 ms back-off this is roughly half a second of solid failure -- long past
+/// anything transient.
+const ERRORS_BEFORE_FAULT: u32 = 500;
+
 /// Sensor samples averaged into one measurement for the estimator.
 ///
-/// Not a taste setting -- it follows from three measured rates. The readout
-/// runs at about 2100 Hz, and core 1 needs 644 us per sample, which is half as
-/// long again as the 406-cycle filter step itself because the estimator task
-/// around it lives in flash. So core 1 cannot take every sample, and the
-/// question is only what to do about it.
+/// Not a taste setting -- it follows from measured rates. Core 1 needs 644 us
+/// per sample, half as long again as the 406-us filter step itself, because
+/// the estimator task around the step lives in flash while only the step is
+/// relocated. The readout meanwhile delivers a sample every 340-490 us. So
+/// core 1 cannot take every sample, and the question is only what to do about
+/// it.
+///
+/// Note the readout rate is not a constant: 2033 to 2957 Hz have been recorded
+/// on the same board, varying with the sensors' own conversion timing rather
+/// than with anything in this firmware. At `2` the estimator needs 644 us of
+/// every second sample interval, which is comfortable at 2100 Hz and tight at
+/// the 2957 Hz end. If the `stream:` line ever shows the estimator at less
+/// than half the readout, that margin has run out and this wants to be `3`.
 ///
 /// The steady-state posterior of a random walk goes as `sqrt(T * R)`, with `T`
 /// the interval between filter updates and `R` the variance of what it is fed.
@@ -158,6 +226,28 @@ const USB_WRITE_TIMEOUT: Duration = Duration::from_millis(10);
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+
+    // Read before anything else can clear it, and log it unconditionally: on a
+    // device with no probe this is the only way to tell an ordinary power-up
+    // from a watchdog reset or a panic reboot, and "it restarted itself" is
+    // otherwise invisible. `Timer` means a reset that the watchdog caused; the
+    // debug stream carries it to the host, so a field unit can be asked.
+    let mut watchdog = Watchdog::new(p.WATCHDOG);
+    // `ResetReason` has no `defmt::Format`, so it is matched rather than
+    // formatted -- which is no loss, since the two cases want different words.
+    match watchdog.reset_reason() {
+        Some(embassy_rp::watchdog::ResetReason::TimedOut) => {
+            warn!("boot: the watchdog reset the last run -- something wedged")
+        }
+        Some(embassy_rp::watchdog::ResetReason::Forced) => {
+            warn!("boot: the last run was reset deliberately")
+        }
+        None => info!("boot: power-on or external reset"),
+    }
+    // The default, set explicitly because it is load-bearing during
+    // development: without it, halting the core at a breakpoint lets the
+    // watchdog expire and reset the target out from under the debugger.
+    watchdog.pause_on_debug(true);
 
     // ── LED ring ──
     // Started first, so that everything after this point has a way to say what
@@ -263,9 +353,6 @@ async fn main(spawner: Spawner) {
         },
     );
 
-    Timer::after_millis(1500).await;
-    info!("Hello — defmt online");
-
     // ── Sensors ──
     info!("Initializing sensors…");
 
@@ -345,12 +432,35 @@ async fn main(spawner: Spawner) {
     let mut accumulator = [0i32; 9];
     let mut accumulated: u32 = 0;
     let mut errors: u32 = 0;
+    let mut consecutive_errors: u32 = 0;
     let mut sent: u32 = 0;
     let mut window_start = Instant::now();
     let mut window_samples: u32 = 0;
     let mut window_steps: u32 = estimator::steps_completed();
 
+    // Started only once the sensors are up: bring-up has its own three-second
+    // timeout and ends in `fault()`, which is a diagnosed stop with a red ring
+    // rather than something a reset would improve.
+    watchdog.start(WATCHDOG_PERIOD);
+    let mut core1_steps = estimator::steps_completed();
+    let mut core1_deadline = Instant::now() + CORE1_LIVENESS_WINDOW;
+    let mut core1_alive = true;
+    let mut fault_shown = false;
+
     loop {
+        // Before the fallible read, so that a failing sensor does not also
+        // starve the watchdog -- see `ERRORS_BEFORE_FAULT`.
+        let now = Instant::now();
+        if now >= core1_deadline {
+            let steps = estimator::steps_completed();
+            core1_alive = steps != core1_steps;
+            core1_steps = steps;
+            core1_deadline = now + CORE1_LIVENESS_WINDOW;
+        }
+        if core1_alive {
+            watchdog.feed();
+        }
+
         let counts = match sensors.read_raw().await {
             Ok(r) => r,
             Err(e) => {
@@ -360,8 +470,14 @@ async fn main(spawner: Spawner) {
                 // produced constantly. Log the first, then sample, so a
                 // persistent fault is visible without flooding the transport.
                 errors += 1;
+                consecutive_errors += 1;
                 if errors == 1 || errors % 256 == 0 {
                     warn!("read error #{} (sent {}): {}", errors, sent, e);
+                }
+                if consecutive_errors == ERRORS_BEFORE_FAULT && !fault_shown {
+                    warn!("{} consecutive read errors; ring to red", consecutive_errors);
+                    led::set(Pattern::Solid(led::RED));
+                    fault_shown = true;
                 }
                 seq = seq.wrapping_add(1);
                 // Back off only on the error path: a failing read can return
@@ -371,6 +487,16 @@ async fn main(spawner: Spawner) {
                 continue;
             }
         };
+
+        consecutive_errors = 0;
+        if fault_shown {
+            // Core 1 owns the ring during a calibration and will reassert its
+            // own pattern on its next state change, so restoring green here is
+            // at worst briefly wrong and never sticky.
+            info!("sensor reads recovered");
+            led::set(Pattern::Solid(led::GREEN));
+            fault_shown = false;
+        }
 
         let t_us = Instant::now().as_micros() as u32;
 

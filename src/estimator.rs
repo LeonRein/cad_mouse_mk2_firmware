@@ -225,13 +225,35 @@ pub async fn task() -> ! {
     loop {
         let sample = SAMPLE.wait().await;
 
-        // Put the ring back after an abort flash has had its time.
+        // Put the ring back after an abort flash has had its time -- or, if
+        // there has never been a successful calibration, start another one.
+        //
+        // That distinction is the difference between a usable device and a
+        // dead-looking one. `status::CALIBRATED` is set in exactly one place,
+        // when a calibration *finishes*, and the HID task reports zeros on
+        // every axis until it is set. So a boot calibration that aborts
+        // because the user happened to be holding the knob used to leave the
+        // ring solid green -- the "everything is fine" colour -- on a device
+        // that would report nothing at all until someone found the button
+        // gesture. On a board with a probe attached that is a warning in the
+        // log; on one sealed inside the enclosure it looks like broken
+        // hardware.
+        //
+        // A recalibration that the *user* asked for is different: that one
+        // already has a valid calibration behind it, so abandoning it and
+        // going back to green is right.
         if let Some(at) = revert_led_at
             && Instant::now() >= at
         {
-            led::set(Pattern::Solid(led::GREEN));
             revert_led_at = None;
             flags &= !status::CALIBRATION_ABORTED;
+            if flags & status::CALIBRATED == 0 {
+                info!("core 1: no calibration yet, trying again");
+                running = Some(RestCalibration::new());
+                led::set(Pattern::Spinner(led::BLUE));
+            } else {
+                led::set(Pattern::Solid(led::GREEN));
+            }
         }
 
         // A request that arrives mid-calibration restarts it, which is what

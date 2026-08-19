@@ -44,6 +44,9 @@ pub const GREEN: RGB8 = RGB8::new(0, LEVEL, 0);
 pub const BLUE: RGB8 = RGB8::new(0, 0, LEVEL);
 pub const RED: RGB8 = RGB8::new(LEVEL, 0, 0);
 pub const WHITE: RGB8 = RGB8::new(LEVEL / 2, LEVEL / 2, LEVEL / 2);
+pub const YELLOW: RGB8 = RGB8::new(LEVEL, LEVEL, 0);
+/// A dark pixel, for use as a [`Pattern::Progress`] background.
+pub const OFF: RGB8 = RGB8::new(0, 0, 0);
 
 /// What the ring should be doing.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -57,10 +60,18 @@ pub enum Pattern {
     /// One lit pixel walking around the ring. The calibration indicator, as in
     /// the original firmware's `CalibratingState`.
     Spinner(RGB8),
-    /// The first `lit` pixels on, the rest off -- a progress bar bent into a
-    /// circle. Used for the five-second button hold, so the gesture is visible
-    /// before it commits to anything.
-    Progress { color: RGB8, lit: u8 },
+    /// The first `lit` pixels in `color`, the rest left showing `background`
+    /// -- a progress bar bent into a circle.
+    ///
+    /// The background is what lets one gesture have two stages: the button
+    /// hold fills green on black up to the calibration point, then yellow on
+    /// blue up to the bootloader one, so the ring says both "how far along am
+    /// I" and "what will happen if I let go now" at the same time.
+    Progress {
+        color: RGB8,
+        background: RGB8,
+        lit: u8,
+    },
 }
 
 /// The current pattern. A `Signal` rather than a channel: only the newest
@@ -129,12 +140,17 @@ fn render(pattern: Pattern, elapsed_ms: u32) -> [RGB8; LED_COUNT] {
             pixels[index] = color;
             pixels
         }
-        Pattern::Progress { color, lit } => {
-            let mut pixels = [off; LED_COUNT];
-            for (i, pixel) in pixels.iter_mut().enumerate() {
-                if i < lit as usize {
-                    *pixel = color;
-                }
+        Pattern::Progress {
+            color,
+            background,
+            lit,
+        } => {
+            let mut pixels = [background; LED_COUNT];
+            // `take` rather than an index test: it saturates on its own, so a
+            // caller that computes `lit` past the end of the ring gets a full
+            // ring instead of a panic.
+            for pixel in pixels.iter_mut().take(lit as usize) {
+                *pixel = color;
             }
             pixels
         }
@@ -147,9 +163,59 @@ mod tests {
 
     #[test]
     fn progress_lights_exactly_the_requested_pixels() {
-        let pixels = render(Pattern::Progress { color: GREEN, lit: 3 }, 0);
+        let pixels = render(
+            Pattern::Progress {
+                color: GREEN,
+                background: OFF,
+                lit: 3,
+            },
+            0,
+        );
         assert_eq!(pixels[2], GREEN);
-        assert_eq!(pixels[3], RGB8::default());
+        assert_eq!(pixels[3], OFF);
+    }
+
+    #[test]
+    fn progress_leaves_the_background_where_it_is_not_filled() {
+        let pixels = render(
+            Pattern::Progress {
+                color: YELLOW,
+                background: BLUE,
+                lit: 2,
+            },
+            0,
+        );
+        assert_eq!(pixels[1], YELLOW);
+        assert_eq!(pixels[2], BLUE, "the unfilled part carries the background");
+    }
+
+    #[test]
+    fn progress_saturates_rather_than_panicking_past_the_end() {
+        let pixels = render(
+            Pattern::Progress {
+                color: YELLOW,
+                background: BLUE,
+                lit: 200,
+            },
+            0,
+        );
+        assert_eq!(pixels, [YELLOW; LED_COUNT]);
+    }
+
+    #[test]
+    fn an_empty_fill_is_all_background() {
+        let pixels = render(
+            Pattern::Progress {
+                color: YELLOW,
+                background: BLUE,
+                lit: 0,
+            },
+            0,
+        );
+        assert_eq!(
+            pixels, [BLUE; LED_COUNT],
+            "the moment the hold passes the calibration point"
+        );
     }
 
     #[test]

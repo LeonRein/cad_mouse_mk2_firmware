@@ -580,6 +580,53 @@ in `shaping.rs` pins these numbers so the trade stays visible.
 The original firmware's `GAIN_T`/`GAIN_R` do **not** carry over — they scaled
 raw magnetic deltas in counts, and nothing here is in counts.
 
+## Running without a debug probe
+
+Everything above assumes `probe-rs` on the other end of an SWD connection. Once
+the board is sealed into the device that connection is gone, and a handful of
+things that are merely inconvenient on the bench become indistinguishable from
+broken hardware. What the firmware does about each:
+
+| | on the bench | installed |
+|---|---|---|
+| a panic | breaks into the debugger | logs, then resets — a reboot loop is a visible symptom, a halt is not |
+| either core wedging | you notice in the log | watchdog resets after 2 s |
+| the boot calibration aborting | a `warn!` in the log | retries, rather than sitting on solid green reporting nothing |
+| a dead sensor | a flood of `warn!` | ring goes solid red after ~0.5 s of failures |
+| defmt logging | drained by probe-rs | RTT is non-blocking, so frames are dropped and nothing stalls |
+
+The panic handler picks between the two by reading `C_DEBUGEN`, so it is the
+same binary in both cases — there is no "release build" that behaves
+differently from the one you tested.
+
+### Flashing it
+
+    scripts/mkuf2.sh        # -> target/cad-mouse-mk2-firmware.uf2
+
+Hold BOOTSEL while plugging the board in, and copy that file onto the mass
+storage device that appears. See the script's header for the two things that
+otherwise waste an afternoon (the `.elf` extension, and the `rp2350-arm-s`
+family).
+
+The BOOTSEL button need not be reachable: the firmware has its own way in.
+**Hold both side buttons for ten seconds.** The ring fills green for the first
+five, turns solid blue (release here and it calibrates instead), then fills
+yellow over the blue for the second five. When the yellow is full the ring goes
+solid **red** — that is the "done, let go" signal — and the device reboots into
+the bootloader. The red stays lit the whole time it waits for a UF2, so a
+device in BOOTSEL never looks like a dead one.
+
+The watchdog is disabled on the way out, deliberately — it is fed by the
+readout loop, and that loop stops existing at the reboot.
+
+### What still wants a probe
+
+Nothing, for normal use. `bench_forward` does — it reports through defmt and
+has nowhere else to write. The CDC debug stream survives, though, so
+`record.py` and `view.py` keep working over plain USB; that is the diagnostic
+path once the probe is gone, and it is worth remembering that opening it
+changes the sample rate.
+
 ## Not done here
 
 The sleep state (the original slept after two minutes); the sequential-sampling
