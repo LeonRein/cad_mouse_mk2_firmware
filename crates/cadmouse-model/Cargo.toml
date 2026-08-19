@@ -2,7 +2,10 @@
 name = "cadmouse-model"
 version = "0.1.0"
 edition = "2024"
+authors = ["LeonRein <4107480+LeonRein@users.noreply.github.com>"]
 description = "Measurement model and field table for the CAD Mouse MK2 knob"
+license = "MIT"
+repository = "https://github.com/LeonRein/cad_mouse_mk2_firmware"
 
 [dependencies]
 libm = "0.2"

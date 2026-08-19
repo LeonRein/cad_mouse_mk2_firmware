@@ -337,6 +337,12 @@ rather than of the port:
 cd scripts && uv run --group dev pytest -q      # 67 tests, ~60 s
 ```
 
+**31 of those 67 skip on a fresh clone.** They need a recorded session, and
+`scripts/data/` is not in the repository — it is 33 MB of device-specific
+measurement. Record your own (`uv run record.py -o data/session1.csv`) and they
+light up; the fixture takes any `.csv` in that directory, not one hardcoded
+name.
+
 Two things worth knowing:
 
 - **Nothing in `src/` is tested.** The binary has `test = false` and the crate
@@ -364,3 +370,14 @@ scripts/mkuf2.sh         package a release build as a UF2
 
 `scripts/README.md` covers the host side in far more detail, including why the
 calibration is shaped the way it is and what goes wrong when it is not.
+
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+The USB identity is `1209:0001` — a pid.codes **test** PID, fine for a personal
+build. If you build devices from this, request a permanent one; they are free
+for open-source projects, which is the only condition attached to the vendor
+ID.

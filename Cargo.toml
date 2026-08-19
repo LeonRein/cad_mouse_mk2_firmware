@@ -2,7 +2,10 @@
 edition = "2024"
 name = "cad-mouse-mk2-firmware"
 version = "0.1.0"
-authors = ["Your Name <you@example.com>"]
+authors = ["LeonRein <4107480+LeonRein@users.noreply.github.com>"]
+description = "Six-degree-of-freedom CAD mouse firmware for the RP2350"
+license = "MIT"
+repository = "https://github.com/LeonRein/cad_mouse_mk2_firmware"
 resolver = "2"
 
 # Two library crates, split along the line of what is reusable:
