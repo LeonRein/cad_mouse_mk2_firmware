@@ -53,7 +53,10 @@ cortex-m = { version = "0.7.7" }
 embassy-rp = { version = "0.9", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xa"] }
 embassy-usb = "0.5.1"
 static_cell = "2.1.1"
-tli493d = { path = "../tli493d", features = ["defmt"] }
+# The sensor driver, from its own repository rather than a sibling checkout,
+# so this builds from a clean clone. `Cargo.lock` pins the exact commit; use
+# `cargo update -p tli493d` to move it deliberately.
+tli493d = { git = "https://github.com/LeonRein/tli493d.git", features = ["defmt"] }
 embassy-embedded-hal = "0.6.0"
 smart-leds = "0.4.0"
 libm = "0.2"

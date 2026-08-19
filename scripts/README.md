@@ -27,9 +27,9 @@ Four steps, in order, one script each:
 
 ```
 uv run record.py    -o data/session1.csv       # capture ~90 s from the device
-uv run calibrate.py data/session1.csv -o calibration.json
-uv run view.py      calibration.json           # watch it live, check the signs
-uv run export.py    calibration.json           # emit table + calibration for the firmware
+uv run calibrate.py data/session1.csv -o calibrations/calibration.json
+uv run view.py      calibrations/calibration.json           # watch it live, check the signs
+uv run export.py    calibrations/calibration.json           # emit table + calibration for the firmware
 ```
 
 Each has `--help`, and each has a section below. `calibrate.py` and `export.py`
@@ -41,8 +41,8 @@ producing an artefact; the second produces the vectors the Rust port is checked
 against, and should be re-run whenever the model or the calibration changes:
 
 ```
-uv run python -m cadmouse.filter data/session1.csv calibration.json  # IEKF vs UKF
-uv run python -m cadmouse.golden data/session1.csv calibration.json  # golden vectors
+uv run python -m cadmouse.filter data/session1.csv calibrations/calibration.json  # IEKF vs UKF
+uv run python -m cadmouse.golden data/session1.csv calibrations/calibration.json  # golden vectors
 ```
 
 ## Two calibrations
@@ -175,7 +175,7 @@ Measured against `data/session1.csv`, with nominal geometry (see
 ## Calibrating
 
 ```
-uv run calibrate.py data/session1.csv -o calibration.json
+uv run calibrate.py data/session1.csv -o calibrations/calibration.json
 ```
 
 A bundle adjustment: 27 calibration parameters and the pose of every fitted
@@ -224,7 +224,7 @@ fact, not converging.
 ## Filtering
 
 ```
-uv run python -m cadmouse.filter data/session1.csv calibration.json
+uv run python -m cadmouse.filter data/session1.csv calibrations/calibration.json
 ```
 
 Two estimators behind one interface, on the six-element pose with a
@@ -303,8 +303,8 @@ puts the magnet-stack question above at the top of the list.
 ## Watching it work
 
 ```
-uv run view.py calibration.json                      # live, from the device
-uv run view.py calibration.json --replay data/session1.csv
+uv run view.py calibrations/calibration.json                      # live, from the device
+uv run view.py calibrations/calibration.json --replay data/session1.csv
 ```
 
 A 3-D wireframe of the knob, six live traces, and a panel naming what the
@@ -354,7 +354,7 @@ backend.
 ## Exporting to the firmware
 
 ```
-uv run export.py calibration.json
+uv run export.py calibrations/calibration.json
 ```
 
 Writes `crates/cadmouse-model/gen/field_table.bin` (97 kB of raw little-endian

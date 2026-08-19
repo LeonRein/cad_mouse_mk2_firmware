@@ -1438,6 +1438,7 @@ dependencies = [
 [[package]]
 name = "tli493d"
 version = "0.1.0"
+source = "git+https://github.com/LeonRein/tli493d.git#8c2c54f3bfbdf7351ec45b38a6e89b502aff7a40"
 dependencies = [
  "defmt",
  "embedded-hal-async",

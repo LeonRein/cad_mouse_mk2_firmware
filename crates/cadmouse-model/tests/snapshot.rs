@@ -55,29 +55,56 @@ fn render() -> String {
         }
     }
 
-    // A full filter run. The golden FRAMES are stale as *targets* but remain a
-    // perfectly good measurement sequence to drive the filter with.
-    #[allow(dead_code)]
-    mod golden {
-        include!("data/golden_data.rs");
-    }
+    // A full filter run, driven by a measurement sequence this file builds
+    // itself.
+    //
+    // It used to be driven by `golden_data.rs`. That coupled this snapshot to
+    // a *regenerable* input: the day those vectors were rebuilt -- which is a
+    // routine, correct thing to do -- every filter value here moved by four
+    // orders of magnitude and the test reported a behaviour change that had
+    // not happened. A regression net that cries wolf when its own inputs are
+    // legitimately updated is worse than none.
+    //
+    // So the trajectory is synthesised: a slow sweep through the envelope, run
+    // through the model, plus a deterministic wobble at the scale of the real
+    // noise floor. Nothing outside this file can move it.
     let model = PoseModel::new(&table);
+    let sigma = [tuning::FALLBACK_SIGMA_COUNTS; MEAS_DIM];
     let mut ekf = IteratedEkf::<POSE_DIM, MEAS_DIM>::new(
-        golden::INITIAL_POSE,
+        [0.0; POSE_DIM],
         tuning::initial_variance(),
-        tuning::measurement_variance(&golden::SIGMA),
+        tuning::measurement_variance(&sigma),
     );
     ekf.set_process_noise(tuning::process_noise());
     ekf.set_iterations(tuning::ITERATIONS);
 
-    for k in 0..golden::N_FRAMES {
+    let mut state: u32 = 0xC0FF_EE01;
+    let mut noise = move || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) as f32 / 16_777_216.0 - 0.5
+    };
+
+    const N_FRAMES: usize = 400;
+    const DT: f32 = 0.001;
+    for k in 0..N_FRAMES {
+        // A smooth path through the envelope, so the filter tracks something
+        // physical rather than chasing noise.
+        let t = k as f32 / N_FRAMES as f32;
+        let pose: Pose = [
+            1.2 * libm::sinf(6.0 * t),
+            1.2 * libm::sinf(4.0 * t + 1.0),
+            0.8 * libm::sinf(5.0 * t + 2.0),
+            0.05 * libm::sinf(3.0 * t),
+            0.05 * libm::sinf(7.0 * t + 0.5),
+            0.05 * libm::sinf(2.0 * t + 1.5),
+        ];
+        let truth = forward(&pose, &table);
         let mut z = [0.0f32; MEAS_DIM];
         for c in 0..MEAS_DIM {
-            z[c] = golden::FRAMES[k][c] as f32;
+            z[c] = truth[c] + 2.0 * tuning::FALLBACK_SIGMA_COUNTS * noise();
         }
-        if golden::DTS[k] > 0.0 {
-            ekf.predict(golden::DTS[k]);
-        }
+
+        ekf.predict(DT);
         ekf.update(&model, &z).expect("filter stayed positive definite");
         for v in ekf.state() {
             writeln!(s, "x {v:.6e}").unwrap();
