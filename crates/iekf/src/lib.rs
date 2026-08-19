@@ -241,17 +241,18 @@ impl<const N: usize, const M: usize> IteratedEkf<N, M> {
             jac = j;
 
             // S = J P J^T + R, and its factorisation, reused for both the gain
-            // and the NIS.
+            // and the NIS. `P` is symmetric, so `(J P) J^T` is too -- computing
+            // only its lower triangle halves the work *and* makes the result
+            // exactly symmetric, which is why no `symmetrise` follows.
             let jp = linalg::matmul(&jac, &prior_p); // (M, N)
-            let mut s = linalg::matmul_transpose(&jp, &jac); // (M, M)
+            let mut s = linalg::matmul_transpose_symmetric(&jp, &jac); // (M, M)
             linalg::add_diagonal(&mut s, &self.r_diag);
-            linalg::symmetrise(&mut s);
             let Some(chol) = linalg::cholesky(&s) else {
                 return Err(UpdateError::NotPositiveDefinite);
             };
 
             // K = P J^T S^-1, obtained as (S^-1 J P)^T since S is symmetric.
-            gain = linalg::transpose(&linalg::cholesky_solve_mat(&chol, &jp));
+            gain = linalg::cholesky_solve_mat_transposed(&chol, &jp);
 
             // The (prior_x - x) term is what makes this iterated rather than
             // merely repeated.
@@ -285,12 +286,11 @@ impl<const N: usize, const M: usize> IteratedEkf<N, M> {
         // Joseph form: stays symmetric and positive definite under f32, which
         // the shorter (I - K H) P does not reliably do.
         let kh = linalg::matmul(&gain, &jac); // (N, N)
-        let mut a = linalg::eye::<N>();
-        for i in 0..N {
-            for j in 0..N {
-                a[i][j] -= kh[i][j];
-            }
-        }
+        // I - K H, built in one pass rather than as an identity that is then
+        // decremented -- the latter costs a zeroing memset and a second pass.
+        let a: Mat<N, N> = core::array::from_fn(|i| {
+            core::array::from_fn(|j| if i == j { 1.0 - kh[i][j] } else { -kh[i][j] })
+        });
         let ap = linalg::matmul(&a, &prior_p);
         let mut p = linalg::matmul_transpose(&ap, &a);
 

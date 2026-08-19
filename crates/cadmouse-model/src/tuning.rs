@@ -33,9 +33,18 @@ pub const INITIAL_ROT_VAR: f32 = 3.490_658_5e-3 * 3.490_658_5e-3;
 ///
 /// Two, not because more was measured to help -- one to five are
 /// indistinguishable on the held-out segment, forty times below the noise
-/// floor -- but because each costs a measured ~20 400 cycles on target against
-/// a 75 000-cycle budget, so the second is affordable insurance for transients
-/// that 20 s of recorded motion may not contain.
+/// floor -- but because the second pass is cheap insurance for transients that
+/// 20 s of recorded motion may not contain.
+///
+/// It is not free, though, and the margin is thinner than it looks. Measured
+/// on target, a whole step costs 60 892 cycles at two iterations. The marginal
+/// cost of the second is one more model evaluation (16 280) plus one more gain
+/// computation (10 515, from the filter-only figures), so about 27 000 cycles
+/// -- roughly 44 % of the step. `bench_forward` measures the components; the
+/// sum is derived rather than measured directly.
+///
+/// That makes this the largest single lever left on core 1's period, if it
+/// ever needs one.
 pub const ITERATIONS: u8 = 2;
 
 /// Fallback per-channel measurement noise, counts.

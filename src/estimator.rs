@@ -6,12 +6,38 @@
 //! nothing but arithmetic -- one iterated EKF step per sample, and the rest
 //! calibration that occasionally runs alongside it.
 //!
-//! The reason is the deadline. A filter step costs a measured ~55 000 cycles
-//! of the 75 000 available at 2 kHz, and that is a *hard* deadline in a way
-//! that a USB transfer is not: a late packet is retried, a late filter step is
-//! a sample thrown away. Sharing a core with a stack that has its own
-//! interrupt-driven timing means the two would occasionally collide, and the
-//! collision would look like sensor noise.
+//! The reason is the deadline. A filter step costs a measured 60 892 cycles,
+//! or 406 us at 150 MHz, and that is a *hard* deadline in a way that a USB
+//! transfer is not: a late packet is retried, a late filter step is a sample
+//! thrown away. Sharing a core with a stack that has its own interrupt-driven
+//! timing means the two would occasionally collide, and the collision would
+//! look like sensor noise.
+//!
+//! # The rate is not 2 kHz, and the step is not the whole cost
+//!
+//! Earlier revisions of this comment quoted a 2 kHz deadline and a 75 000-cycle
+//! budget. Neither survives measurement. The readout loop is unpaced -- it runs
+//! at whatever the I2C clock stretching allows -- and that is about 2100 Hz
+//! with no debug host attached.
+//!
+//! More importantly, `filter_step` is not what this core costs per sample.
+//! The step is 406 us; the task around it takes **644 us**, measured by the
+//! `estimator` figure in the readout loop's rate log. The difference is
+//! everything in the loop below, and all of it executes from flash -- only
+//! `filter_step` is relocated. Optimising the step alone therefore has a
+//! ceiling, and the 238 us outside it is where the remaining work is.
+//!
+//! Beware of measuring one core's rate and inferring the other's. The two are
+//! coupled through [`ESTIMATE`]'s critical section, and the readout rate also
+//! varies with the sensors' own conversion timing: figures between 2033 and
+//! 2957 Hz were recorded across one session. Only ever compare rates from the
+//! same run, and prefer the counters over `seq` lag.
+//!
+//! Core 0 therefore averages `SAMPLES_PER_ESTIMATE` readings and hands this
+//! core one measurement it can always take, which sets the rate by
+//! construction rather than by a race between the two -- see that constant for
+//! the measurements behind the choice. Nothing here scales `R` to match: the
+//! rest calibration measures the noise of the stream it is actually fed.
 //!
 //! # What crosses, and what happens when core 1 falls behind
 //!
@@ -33,6 +59,7 @@
 
 use core::cell::Cell;
 use core::ptr::addr_of_mut;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use cadmouse_model::generated as consts;
 use cadmouse_model::magnet::FieldTable;
@@ -70,6 +97,18 @@ pub struct Estimate {
     pub progress: u8,
 }
 
+/// Filter steps completed since boot.
+///
+/// Core 1's own rate, which is not derivable from anything core 0 can see: the
+/// readout rate says how fast samples are produced, and `seq` lag says how
+/// stale the newest estimate is, but neither says how often this core actually
+/// finishes a step. Deciding how many samples to average needs exactly that
+/// number, so it is measured rather than inferred.
+///
+/// Relaxed, and read only as a difference over a five-second window -- a stale
+/// or torn read costs nothing here.
+static STEPS: AtomicU32 = AtomicU32::new(0);
+
 static SAMPLE: Signal<CriticalSectionRawMutex, Sample> = Signal::new();
 static ESTIMATE: BlockingMutex<CriticalSectionRawMutex, Cell<Option<Estimate>>> =
     BlockingMutex::new(Cell::new(None));
@@ -82,6 +121,11 @@ pub fn submit(sample: Sample) {
 /// The newest estimate, or `None` before the first one.
 pub fn latest() -> Option<Estimate> {
     ESTIMATE.lock(|cell| cell.get())
+}
+
+/// Filter steps completed since boot; see [`STEPS`].
+pub fn steps_completed() -> u32 {
+    STEPS.load(Ordering::Relaxed)
 }
 
 /// The field table, copied out of flash into RAM.
@@ -97,14 +141,19 @@ static mut TABLE_RAM: [u8; consts::TABLE_BYTES] = [0; consts::TABLE_BYTES];
 /// This placement is worth more than every other optimisation in the
 /// estimator put together, and it is not obvious, so: the RP2350 executes from
 /// external QSPI flash through a small XIP cache. The measurement model and
-/// the filter's linear algebra each fit in that cache on their own — measured
-/// at 24 000 and 24 000 cycles — but together they do not, and every pass
-/// refetches from flash. Measured, one whole step:
+/// the filter's linear algebra each fit in that cache on their own, but
+/// together they do not, and every pass refetches from flash. Measured, one
+/// whole step at the shipping iteration count:
 ///
 /// | | cycles |
 /// |---|---|
-/// | model and filter, from flash | 297 993 |
-/// | the same code, from SRAM | **141 321** |
+/// | model and filter, from flash | 89 230 |
+/// | the same code, from SRAM | **60 892** |
+///
+/// The ratio was 2.1x when this comment was first written and is 1.5x now.
+/// That is not the placement mattering less -- it is the code around it having
+/// shrunk, so less of it misses the cache. Re-measure before quoting either
+/// number; `bench_forward` prints both.
 ///
 /// `.data` is copied to SRAM by the startup code, so a function placed there
 /// executes from SRAM; `inline(never)` keeps it a real function so the
@@ -220,6 +269,7 @@ pub async fn task() -> ! {
             }
         }
 
+        STEPS.fetch_add(1, Ordering::Relaxed);
         let estimate = *ekf.state();
 
         // ── calibration, if one is running ──
@@ -270,11 +320,17 @@ pub async fn task() -> ! {
             flags &= !status::IN_DEADZONE;
         }
 
+        // `nis()` is a 9x9 triangular solve, and this lock is taken by core 0
+        // on every readout for `submit` and `latest`. Computing it inside the
+        // lock put core 1's arithmetic directly into core 0's sampling loop --
+        // the two rates were measurably coupled. It is only ever read by the
+        // debug frame, so it does not belong in a cross-core critical section.
+        let nis = ekf.nis();
         ESTIMATE.lock(|cell| {
             cell.set(Some(Estimate {
                 seq: sample.seq,
                 pose,
-                nis: ekf.nis(),
+                nis,
                 status: flags,
                 progress,
             }))

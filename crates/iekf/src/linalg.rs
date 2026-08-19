@@ -14,6 +14,7 @@ pub type Mat<const ROWS: usize, const COLS: usize> = [[f32; COLS]; ROWS];
 pub type Vec<const N: usize> = [f32; N];
 
 /// Identity.
+#[inline(always)]
 pub fn eye<const N: usize>() -> Mat<N, N> {
     let mut out = [[0.0; N]; N];
     for (i, row) in out.iter_mut().enumerate() {
@@ -23,68 +24,110 @@ pub fn eye<const N: usize>() -> Mat<N, N> {
 }
 
 /// `a * b`.
+///
+/// The loop order is `i, j, k` with a *register* accumulator, not the more
+/// natural `i, k, j` accumulating into `out`. On a single-issue FPU that is
+/// the whole ballgame: `i, k, j` turns every multiply-accumulate into a
+/// load-fma-store against the stack, so a 9x6 by 6x6 costs 324 round trips to
+/// memory instead of 324 register FMAs and 54 stores. Measured on target, the
+/// filter step was doing 2.5 memory accesses per arithmetic operation before
+/// this was changed.
+///
+/// It also drops a `if aik == 0.0 { continue; }` guard that used to sit in the
+/// inner loop. Skipping a zero looks free and is not: reading an FPU compare
+/// back into the core flags (`vcmp` then `vmrs APSR_nzcv`) stalls the pipeline,
+/// and neither the covariance nor the measurement Jacobian is sparse, so the
+/// branch never actually fired.
+#[inline(always)]
 pub fn matmul<const A: usize, const B: usize, const C: usize>(
     a: &Mat<A, B>,
     b: &Mat<B, C>,
 ) -> Mat<A, C> {
-    let mut out = [[0.0f32; C]; A];
+    // `from_fn` rather than zero-then-fill: every element is written exactly
+    // once here, so the `[[0.0; C]; A]` that used to open this function was
+    // dead -- but LLVM could not prove it and emitted a call to
+    // `__aeabi_memclr4`, which lives in flash, for each one. Fifteen of those
+    // per filter step, from code deliberately relocated to SRAM.
+    core::array::from_fn(|i| {
+        core::array::from_fn(|j| {
+            let mut acc = 0.0;
+            for k in 0..B {
+                acc += a[i][k] * b[k][j];
+            }
+            acc
+        })
+    })
+}
+
+/// `a * b^T`, where the result is known to be symmetric.
+///
+/// Computes the lower triangle and mirrors it. For `S = (J P) J^T` that is 45
+/// entries instead of 81, and it makes the result symmetric *exactly* rather
+/// than to within rounding -- so the [`symmetrise`] pass that used to follow
+/// it is not merely cheaper, it is unnecessary.
+///
+/// # Correctness
+///
+/// The caller is asserting the symmetry, not the function: `a * b^T` is
+/// symmetric only for particular `a` and `b`. It holds for `J P` against `J`
+/// because `P` is symmetric. Passing anything else silently discards the upper
+/// triangle.
+#[inline(always)]
+pub fn matmul_transpose_symmetric<const A: usize, const B: usize>(
+    a: &Mat<A, B>,
+    b: &Mat<A, B>,
+) -> Mat<A, A> {
+    let mut out = [[0.0f32; A]; A];
     for i in 0..A {
-        for k in 0..B {
-            let aik = a[i][k];
-            if aik == 0.0 {
-                continue;
+        for j in 0..=i {
+            let mut acc = 0.0;
+            for k in 0..B {
+                acc += a[i][k] * b[j][k];
             }
-            for j in 0..C {
-                out[i][j] += aik * b[k][j];
-            }
+            out[i][j] = acc;
+            out[j][i] = acc;
         }
     }
     out
 }
 
 /// `a * b^T`.
+#[inline(always)]
 pub fn matmul_transpose<const A: usize, const B: usize, const C: usize>(
     a: &Mat<A, B>,
     b: &Mat<C, B>,
 ) -> Mat<A, C> {
-    let mut out = [[0.0f32; C]; A];
-    for i in 0..A {
-        for j in 0..C {
+    core::array::from_fn(|i| {
+        core::array::from_fn(|j| {
             let mut acc = 0.0;
             for k in 0..B {
                 acc += a[i][k] * b[j][k];
             }
-            out[i][j] = acc;
-        }
-    }
-    out
+            acc
+        })
+    })
 }
 
 /// `a * v`.
+#[inline(always)]
 pub fn matvec<const A: usize, const B: usize>(a: &Mat<A, B>, v: &Vec<B>) -> Vec<A> {
-    let mut out = [0.0f32; A];
-    for i in 0..A {
+    core::array::from_fn(|i| {
         let mut acc = 0.0;
         for k in 0..B {
             acc += a[i][k] * v[k];
         }
-        out[i] = acc;
-    }
-    out
+        acc
+    })
 }
 
 /// `a^T`.
+#[inline(always)]
 pub fn transpose<const A: usize, const B: usize>(a: &Mat<A, B>) -> Mat<B, A> {
-    let mut out = [[0.0f32; A]; B];
-    for i in 0..A {
-        for j in 0..B {
-            out[j][i] = a[i][j];
-        }
-    }
-    out
+    core::array::from_fn(|j| core::array::from_fn(|i| a[i][j]))
 }
 
 /// `a + diag(d)`, in place.
+#[inline(always)]
 pub fn add_diagonal<const N: usize>(a: &mut Mat<N, N>, d: &Vec<N>) {
     for i in 0..N {
         a[i][i] += d[i];
@@ -96,6 +139,7 @@ pub fn add_diagonal<const N: usize>(a: &mut Mat<N, N>, d: &Vec<N>) {
 /// The covariance is symmetric in exact arithmetic and drifts in `f32`. Left
 /// alone the asymmetry compounds through the Joseph update and eventually
 /// breaks the Cholesky, which is a very confusing way to discover the problem.
+#[inline(always)]
 pub fn symmetrise<const N: usize>(a: &mut Mat<N, N>) {
     for i in 0..N {
         for j in (i + 1)..N {
@@ -112,36 +156,60 @@ pub fn symmetrise<const N: usize>(a: &mut Mat<N, N>) {
 /// means something upstream has already gone wrong -- a negative process
 /// noise, a measurement noise of zero, or a divergence. Callers are expected
 /// to treat that as a reset condition rather than to paper over it.
+#[inline(always)]
 pub fn cholesky<const N: usize>(a: &Mat<N, N>) -> Option<Mat<N, N>> {
     let mut l = [[0.0f32; N]; N];
-    for i in 0..N {
-        for j in 0..=i {
+    // Column by column rather than row by row, purely so that the reciprocal
+    // of the pivot is formed once per column instead of once per entry below
+    // it. A divide is an order of magnitude dearer than a multiply on this
+    // FPU and there were 36 of them per factorisation.
+    for j in 0..N {
+        let mut acc = a[j][j];
+        for k in 0..j {
+            acc -= l[j][k] * l[j][k];
+        }
+        if !(acc > 0.0) {
+            return None;
+        }
+        let d = libm::sqrtf(acc);
+        l[j][j] = d;
+        let inv = 1.0 / d;
+        for i in (j + 1)..N {
             let mut acc = a[i][j];
             for k in 0..j {
                 acc -= l[i][k] * l[j][k];
             }
-            if i == j {
-                if !(acc > 0.0) {
-                    return None;
-                }
-                l[i][j] = libm::sqrtf(acc);
-            } else {
-                l[i][j] = acc / l[j][j];
-            }
+            l[i][j] = acc * inv;
         }
     }
     Some(l)
 }
 
-/// Solve `L L^T x = b` for one right-hand side.
-pub fn cholesky_solve_vec<const N: usize>(l: &Mat<N, N>, b: &Vec<N>) -> Vec<N> {
+/// Reciprocals of a Cholesky factor's diagonal, for reuse across right-hand
+/// sides.
+///
+/// Both substitutions divide by `l[i][i]`, twice per element per right-hand
+/// side. With six of them that was 108 divides per solve, all by the same nine
+/// numbers.
+#[inline(always)]
+fn inverse_diagonal<const N: usize>(l: &Mat<N, N>) -> Vec<N> {
+    core::array::from_fn(|i| 1.0 / l[i][i])
+}
+
+/// Solve `L L^T x = b` given the factor's precomputed inverse diagonal.
+#[inline(always)]
+fn solve_with_inverse_diagonal<const N: usize>(
+    l: &Mat<N, N>,
+    inv_diag: &Vec<N>,
+    b: &Vec<N>,
+) -> Vec<N> {
     let mut y = [0.0f32; N];
     for i in 0..N {
         let mut acc = b[i];
         for k in 0..i {
             acc -= l[i][k] * y[k];
         }
-        y[i] = acc / l[i][i];
+        y[i] = acc * inv_diag[i];
     }
     let mut x = [0.0f32; N];
     for i in (0..N).rev() {
@@ -149,28 +217,34 @@ pub fn cholesky_solve_vec<const N: usize>(l: &Mat<N, N>, b: &Vec<N>) -> Vec<N> {
         for k in (i + 1)..N {
             acc -= l[k][i] * x[k];
         }
-        x[i] = acc / l[i][i];
+        x[i] = acc * inv_diag[i];
     }
     x
 }
 
-/// Solve `L L^T X = B` for `COLS` right-hand sides at once.
-pub fn cholesky_solve_mat<const N: usize, const COLS: usize>(
+/// Solve `L L^T x = b` for one right-hand side.
+#[inline(always)]
+pub fn cholesky_solve_vec<const N: usize>(l: &Mat<N, N>, b: &Vec<N>) -> Vec<N> {
+    solve_with_inverse_diagonal(l, &inverse_diagonal(l), b)
+}
+
+/// Solve `L L^T X = B` for `COLS` right-hand sides, returning `X^T`.
+///
+/// Transposed on the way out because every caller here wants it that way: the
+/// Kalman gain is `K = P J^T S^-1`, obtained as `(S^-1 (J P))^T` because `S` is
+/// symmetric. Producing `X` and then transposing it costs a full extra pass
+/// over the array for nothing -- the scatter below writes each solved column
+/// straight into the row it belongs in.
+#[inline(always)]
+pub fn cholesky_solve_mat_transposed<const N: usize, const COLS: usize>(
     l: &Mat<N, N>,
     b: &Mat<N, COLS>,
-) -> Mat<N, COLS> {
-    let mut out = [[0.0f32; COLS]; N];
-    for c in 0..COLS {
-        let mut column = [0.0f32; N];
-        for i in 0..N {
-            column[i] = b[i][c];
-        }
-        let solved = cholesky_solve_vec(l, &column);
-        for i in 0..N {
-            out[i][c] = solved[i];
-        }
-    }
-    out
+) -> Mat<COLS, N> {
+    let inv_diag = inverse_diagonal(l);
+    core::array::from_fn(|c| {
+        let column: Vec<N> = core::array::from_fn(|i| b[i][c]);
+        solve_with_inverse_diagonal(l, &inv_diag, &column)
+    })
 }
 
 #[cfg(test)]

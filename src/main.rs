@@ -92,6 +92,61 @@ type MyUsbDevice = UsbDevice<'static, MyUsbDriver>;
 static mut CORE1_STACK: Stack<8192> = Stack::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 
+/// Sensor samples averaged into one measurement for the estimator.
+///
+/// Not a taste setting -- it follows from three measured rates. The readout
+/// runs at about 2100 Hz, and core 1 needs 644 us per sample, which is half as
+/// long again as the 406-cycle filter step itself because the estimator task
+/// around it lives in flash. So core 1 cannot take every sample, and the
+/// question is only what to do about it.
+///
+/// The steady-state posterior of a random walk goes as `sqrt(T * R)`, with `T`
+/// the interval between filter updates and `R` the variance of what it is fed.
+/// All three columns below are measured on target, `sigma` by the device's own
+/// rest calibration:
+///
+/// | | readout | estimator | dropped | `T` | `sigma` | `sqrt(T*R)` |
+/// |---|---|---|---|---|---|---|
+/// | `1` | 2040 Hz | 1553 Hz | 24 % | 644 us | 0.944 | 23.9 |
+/// | **`2`** | 2120 Hz | 1060 Hz | **0 %** | 943 us | **0.707** | **21.7** |
+/// | `3` (predicted) | ~2150 Hz | ~717 Hz | 0 % | 1395 us | 0.617 | 23.0 |
+///
+/// `2` is the optimum, and it is a shallow one -- 9 % in variance, under 5 % in
+/// standard deviation. The stronger argument is the `dropped` column: at `2`
+/// the estimator consumes exactly every second sample, so `dt` is uniform,
+/// which is what the random-walk process model assumes and what a sporadic
+/// 24 % drop quietly violates.
+///
+/// The mean is rounded back to `i16` so nothing downstream changes and the
+/// rest calibration keeps its exact integer statistics. That rounding adds
+/// 1/12 count^2, which is why `sigma` lands at 0.707 rather than the ideal
+/// 0.667 -- but the calibration then measures 0.707 directly, so `R` stays
+/// honest without anybody scaling it by hand. Measuring what is actually fed
+/// to the filter is worth more than the last few per cent.
+///
+/// The cost is half a window of group delay, about 240 us. The HID tick is
+/// 1 ms and the axes are absolute rather than incremental, so it is not
+/// observable.
+///
+/// Re-derive this if either rate moves: the `stream:` line prints all of
+/// readout, estimator and `sigma`.
+const SAMPLES_PER_ESTIMATE: u32 = 2;
+
+/// Integer divide, rounding halves away from zero.
+///
+/// `i32` throughout: the counts are integers and the sum of a handful of them
+/// cannot overflow, so there is no reason to route the mean through `f32` and
+/// no rounding beyond the single one made here.
+fn rounded_div(sum: i32, n: i32) -> i16 {
+    let half = n / 2;
+    let quotient = if sum >= 0 {
+        (sum + half) / n
+    } else {
+        (sum - half) / n
+    };
+    quotient as i16
+}
+
 /// Longest a single debug frame may spend waiting for the host.
 ///
 /// The readout loop must not be hostage to whatever is on the other end of the
@@ -259,11 +314,41 @@ async fn main(spawner: Spawner) {
     //
     // `seq` counts every attempted sample, successful or not, so a gap in the
     // host's log unambiguously means a lost frame.
+    //
+    // # Why the estimator gets a mean and not every sample
+    //
+    // This loop runs faster than the estimator can consume it -- measured
+    // around 2957 Hz against a 391 us filter step -- so [`estimator::submit`],
+    // which keeps only the newest value, used to drop roughly one sample in
+    // six. That is the worst of both worlds: the bus time and the conversion
+    // time are paid for every sample and the information in the dropped ones
+    // is thrown away.
+    //
+    // Averaging instead is free and strictly better. For a random walk with
+    // process PSD `q` observed with variance `R` every `T`, the steady-state
+    // posterior is `sqrt(q*T*R)`. Dropping every second sample gives
+    // `sqrt(q*2T*R)` -- 19 % more standard deviation. Averaging pairs gives
+    // `sqrt(q*2T*R/2)`, which is exactly the full-rate figure back again.
+    //
+    // The mean is rounded back to `i16` so that nothing downstream changes,
+    // and so the rest calibration keeps its exact integer statistics. That
+    // rounding costs a little of what averaging buys -- it adds 1/12 count^2
+    // of quantisation, so two samples of 1.0-count noise land at 0.77 rather
+    // than the ideal 0.71 -- but the calibration then measures 0.77 directly,
+    // so `R` stays honest without anybody scaling it by hand. Measuring what
+    // is actually fed to the filter is worth more than the last 8 %.
+    //
+    // The cost is a half-window of group delay, about 170 us. The HID tick is
+    // 1 ms and the axes are absolute rather than incremental, so it is not
+    // observable.
     let mut seq: u16 = 0;
+    let mut accumulator = [0i32; 9];
+    let mut accumulated: u32 = 0;
     let mut errors: u32 = 0;
     let mut sent: u32 = 0;
     let mut window_start = Instant::now();
     let mut window_samples: u32 = 0;
+    let mut window_steps: u32 = estimator::steps_completed();
 
     loop {
         let counts = match sensors.read_raw().await {
@@ -288,7 +373,28 @@ async fn main(spawner: Spawner) {
         };
 
         let t_us = Instant::now().as_micros() as u32;
-        estimator::submit(estimator::Sample { seq, t_us, counts });
+
+        for (slot, &c) in accumulator.iter_mut().zip(counts.iter()) {
+            *slot += c as i32;
+        }
+        accumulated += 1;
+        if accumulated >= SAMPLES_PER_ESTIMATE {
+            let mut mean = [0i16; 9];
+            for (m, &sum) in mean.iter_mut().zip(accumulator.iter()) {
+                *m = rounded_div(sum, SAMPLES_PER_ESTIMATE as i32);
+            }
+            // `t_us` is the last sample of the window rather than its middle:
+            // the interval between submissions is what `predict` integrates,
+            // and that is the same either way. The constant offset is the
+            // group delay noted above.
+            estimator::submit(estimator::Sample {
+                seq,
+                t_us,
+                counts: mean,
+            });
+            accumulator = [0; 9];
+            accumulated = 0;
+        }
 
         // Whatever core 1 has made of the recent past. Not necessarily this
         // sample -- see `estimator` on why that is the intended behaviour.
@@ -327,12 +433,16 @@ async fn main(spawner: Spawner) {
         let elapsed = window_start.elapsed();
         if elapsed >= Duration::from_secs(5) {
             let hz = window_samples * 1000 / elapsed.as_millis() as u32;
+            let steps_now = estimator::steps_completed();
+            let est_hz = steps_now.wrapping_sub(window_steps) * 1000 / elapsed.as_millis() as u32;
+            window_steps = steps_now;
             let stale = estimate
                 .map(|e| seq.wrapping_sub(e.seq))
                 .unwrap_or(u16::MAX);
             info!(
-                "stream: {} Hz, {} sent, {} errors, estimator {} frames behind, DIAG={:02x}",
+                "stream: {} Hz, estimator {} Hz, {} sent, {} errors, {} frames behind, DIAG={:02x}",
                 hz,
+                est_hz,
                 sent,
                 errors,
                 stale,

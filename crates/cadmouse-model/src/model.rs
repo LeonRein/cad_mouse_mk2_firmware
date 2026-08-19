@@ -1,8 +1,11 @@
 //! The measurement function: six degrees of freedom in, nine counts out.
 //!
 //! A direct port of `scripts/cadmouse/model.py`, and the reason the benchmark
-//! exists: this is roughly ninety per cent of the filter's cost, whichever
-//! filter ships. See that file for why the sum runs over all three magnets
+//! exists: this is a little over half the filter's cost, whichever filter
+//! ships -- 16 280 cycles of a 60 892-cycle step, evaluated twice per step. It
+//! was nearer ninety per cent before the linear algebra around it was measured
+//! rather than assumed; do not trust either figure without re-running
+//! `bench_forward`. See that file for why the sum runs over all three magnets
 //! rather than just the one above each sensor (the two far magnets are worth
 //! 8-14 counts against a one-count noise floor).
 //!
@@ -33,39 +36,79 @@ fn matvec(m: &[[f32; 3]; 3], v: &[f32; 3]) -> [f32; 3] {
     [dot(&m[0], v), dot(&m[1], v), dot(&m[2], v)]
 }
 
-/// Rodrigues' formula, with the small-angle limit handled.
+/// Largest `theta^2` still served by the Taylor series in the two rotation
+/// functions below.
 ///
-/// The knob never exceeds a few degrees, so the series would do -- but a
-/// rotation that quietly stops being orthonormal is a miserable thing to debug
-/// on a target with no debugger attached.
+/// `theta < 0.2 rad` is 11.5 degrees, comfortably past the few degrees the
+/// mechanism reaches, and the series below are carried far enough that they
+/// are *more* accurate than the closed form there, not less: the worst
+/// truncation error over this range is about `1e-8` relative, against an `f32`
+/// epsilon of `1.2e-7`. The closed forms meanwhile lose the cancellation in
+/// `(1 - cos)/theta^2` as theta shrinks.
+///
+/// The exact branch stays for anything larger. Nothing should reach it, but a
+/// filter that has diverged will try, and a rotation matrix that quietly stops
+/// being orthonormal is a miserable thing to debug on a target with no
+/// debugger attached.
+const SERIES_MAX_THETA2: f32 = 0.04;
+
+/// `(sin(theta)/theta, (1 - cos(theta))/theta^2)` from `theta^2`.
+///
+/// Both series in `theta^2`, so no square root is needed either -- which
+/// matters more than it looks: `libm`'s `sqrtf`, `sinf` and `cosf` are
+/// software routines that live in flash, and the callers here run from SRAM
+/// precisely to stay out of flash. One call to `sinf` undoes that for the
+/// duration. Measured, `right_jacobian_so3` alone cost 3 461 cycles of a
+/// 106 907-cycle filter step before this replaced its three transcendentals.
+#[inline(always)]
+fn rotation_coefficients(theta2: f32) -> (f32, f32) {
+    if theta2 <= SERIES_MAX_THETA2 {
+        // Horner in theta^2:
+        //   sin(t)/t       = 1   - t^2/6  + t^4/120 - t^6/5040
+        //   (1 - cos t)/t^2 = 1/2 - t^2/24 + t^4/720 - t^6/40320
+        let s = 1.0 + theta2 * (-1.0 / 6.0 + theta2 * (1.0 / 120.0 + theta2 * (-1.0 / 5040.0)));
+        let c = 0.5 + theta2 * (-1.0 / 24.0 + theta2 * (1.0 / 720.0 + theta2 * (-1.0 / 40320.0)));
+        (s, c)
+    } else {
+        let theta = sqrtf(theta2);
+        (sinf(theta) / theta, (1.0 - cosf(theta)) / theta2)
+    }
+}
+
+/// Rodrigues' formula, written in the rotation vector rather than in a
+/// normalised axis and an angle.
+///
+/// `R = I + (sin t / t) [v]x + ((1 - cos t) / t^2) [v]x^2`, which is the same
+/// rotation as the axis-angle form with `v = t k` -- but it never divides by
+/// `t`, never normalises, and needs only `t^2`. That removes the square root
+/// along with both transcendentals, and with them the degenerate case at
+/// `t = 0` that used to need its own early return.
 ///
 /// Relocated to SRAM: see [the note on `field_and_grad`](field_and_grad).
 #[unsafe(link_section = ".data")]
 #[inline(never)]
 pub fn rotation_from_rotvec(rv: &[f32; 3]) -> [[f32; 3]; 3] {
     let theta2 = rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2];
-    if theta2 < 1e-16 {
-        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-    }
-    let theta = sqrtf(theta2);
-    let (s, c) = (sinf(theta), cosf(theta));
-    let k = [rv[0] / theta, rv[1] / theta, rv[2] / theta];
-    let v = 1.0 - c;
+    let (s, c) = rotation_coefficients(theta2);
+
+    // [v]x^2 = v v^T - theta^2 I, so the diagonal carries cos(theta) as
+    // 1 - c*theta^2 and the rest is one outer product plus the skew term.
+    let diag = 1.0 - c * theta2;
     [
         [
-            c + k[0] * k[0] * v,
-            k[0] * k[1] * v - k[2] * s,
-            k[0] * k[2] * v + k[1] * s,
+            diag + c * rv[0] * rv[0],
+            c * rv[0] * rv[1] - s * rv[2],
+            c * rv[0] * rv[2] + s * rv[1],
         ],
         [
-            k[1] * k[0] * v + k[2] * s,
-            c + k[1] * k[1] * v,
-            k[1] * k[2] * v - k[0] * s,
+            c * rv[1] * rv[0] + s * rv[2],
+            diag + c * rv[1] * rv[1],
+            c * rv[1] * rv[2] - s * rv[0],
         ],
         [
-            k[2] * k[0] * v - k[1] * s,
-            k[2] * k[1] * v + k[0] * s,
-            c + k[2] * k[2] * v,
+            c * rv[2] * rv[0] - s * rv[1],
+            c * rv[2] * rv[1] + s * rv[0],
+            diag + c * rv[2] * rv[2],
         ],
     ]
 }
@@ -132,6 +175,16 @@ fn field_and_grad(
     let mut grad_delta = [[0.0f32; 3]; 3];
     let mut grad_axis = [[0.0f32; 3]; 3];
     if want_grad {
+        // Both gradients are sums of outer products plus a multiple of the
+        // identity. Written that way, everything that depends only on the
+        // output index `i` is built once as a vector and everything that
+        // depends only on `o` is a scalar hoisted out of the inner loop --
+        // which takes each entry from roughly eleven multiplies to four. The
+        // arithmetic is the same arithmetic, only grouped so that the loop
+        // stops recomputing `-zc * s.d_rho_d_rho` nine times.
+        let spread = s.b_rho * inv_rho;
+
+        // Per-`i` vectors: the multipliers of e[o] and axis[o] respectively.
         let ga = [
             s.d_rho_d_rho * e[0] + s.d_rho_d_z * axis[0],
             s.d_rho_d_rho * e[1] + s.d_rho_d_z * axis[1],
@@ -142,18 +195,33 @@ fn field_and_grad(
             s.d_z_d_rho * e[1] + s.d_z_d_z * axis[1],
             s.d_z_d_rho * e[2] + s.d_z_d_z * axis[2],
         ];
-        let spread = s.b_rho * inv_rho;
+        let ua = [
+            -zc * s.d_rho_d_rho * e[0] + s.d_rho_d_z * delta[0],
+            -zc * s.d_rho_d_rho * e[1] + s.d_rho_d_z * delta[1],
+            -zc * s.d_rho_d_rho * e[2] + s.d_rho_d_z * delta[2],
+        ];
+        let uz = [
+            -zc * s.d_z_d_rho * e[0] + s.d_z_d_z * delta[0],
+            -zc * s.d_z_d_rho * e[1] + s.d_z_d_z * delta[1],
+            -zc * s.d_z_d_rho * e[2] + s.d_z_d_z * delta[2],
+        ];
+
+        let spread_zc = spread * zc;
         for o in 0..3 {
+            // Per-`o` scalars, lifted out of the inner loop.
+            let (pe, pa) = (spread * e[o], spread * axis[o]);
+            let se = spread_zc * e[o];
             for i in 0..3 {
-                let ident = if o == i { 1.0 } else { 0.0 };
-                grad_delta[o][i] = e[o] * ga[i]
-                    + spread * (ident - e[o] * e[i] - axis[o] * axis[i])
-                    + axis[o] * gz[i];
-                grad_axis[o][i] = e[o] * (-zc * s.d_rho_d_rho * e[i] + s.d_rho_d_z * delta[i])
-                    + spread * (-zc * (ident - e[o] * e[i]) - axis[o] * delta[i])
-                    + axis[o] * (-zc * s.d_z_d_rho * e[i] + s.d_z_d_z * delta[i])
-                    + s.b_z * ident;
+                grad_delta[o][i] = e[o] * ga[i] + axis[o] * gz[i] - pe * e[i] - pa * axis[i];
+                grad_axis[o][i] = e[o] * ua[i] + axis[o] * uz[i] + se * e[i] - pa * delta[i];
             }
+        }
+
+        // The identity terms, applied once instead of being selected against
+        // nine times inside the loop.
+        for o in 0..3 {
+            grad_delta[o][o] += spread;
+            grad_axis[o][o] += s.b_z - spread_zc;
         }
     }
     (b, grad_delta, grad_axis)
@@ -277,10 +345,15 @@ pub fn right_jacobian_so3(rv: &[f32; 3]) -> [[f32; 3]; 3] {
     let kx = skew(rv);
     let kx2 = matmul3(&kx, &kx);
 
-    // Below this the closed form loses the cancellation in (1 - cos)/theta^2
-    // to f32 rounding; the series is exact enough well past where it is used.
-    let (a, b) = if theta2 < 1e-8 {
-        (0.5, 1.0 / 6.0)
+    // Same reasoning and the same threshold as `rotation_coefficients`:
+    //   (1 - cos t)/t^2   = 1/2 - t^2/24  + t^4/720  - t^6/40320
+    //   (t - sin t)/t^3   = 1/6 - t^2/120 + t^4/5040 - t^6/362880
+    let (a, b) = if theta2 <= SERIES_MAX_THETA2 {
+        (
+            0.5 + theta2 * (-1.0 / 24.0 + theta2 * (1.0 / 720.0 + theta2 * (-1.0 / 40320.0))),
+            1.0 / 6.0
+                + theta2 * (-1.0 / 120.0 + theta2 * (1.0 / 5040.0 + theta2 * (-1.0 / 362880.0))),
+        )
     } else {
         let theta = sqrtf(theta2);
         (

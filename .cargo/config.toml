@@ -6,8 +6,15 @@ target = "thumbv8m.main-none-eabihf"
 # register class. VFP2 implies *double*-precision hardware and this core's FPU
 # is FPv5-SP, single-precision only. With the flag set, LLVM emits `.f64`
 # instructions inside `libm::sinf` and the board takes an undefined-instruction
-# UsageFault on the first rotation. `libm::sqrtf` already lowers to the
-# hardware VSQRT.F32, so there was nothing to win.
+# UsageFault on the first rotation.
+#
+# An earlier version of this comment claimed `libm::sqrtf` already lowers to
+# the hardware VSQRT.F32 and that there was nothing to win. That is wrong:
+# there is no `vsqrt` anywhere in the linked image, and `libm::sqrtf` is 220
+# bytes of integer Newton iteration sitting in flash, reached from the
+# SRAM-resident hot path through a veneer. Getting the instruction still means
+# either an `asm!` formulation that avoids `sreg`, or writing f32 sin/cos to
+# eliminate every `libm` f64 path first. Worth roughly 4 % of a filter step.
 
 [env]
 DEFMT_LOG = "info"

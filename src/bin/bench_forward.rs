@@ -415,6 +415,22 @@ async fn main(_spawner: Spawner) {
             }
         });
         report("full IEKF step (2 iterations), CODE IN RAM", total, calls);
+
+        // The same step with the FPU flushing subnormals to zero. This is the
+        // configuration the firmware actually ships, so it is the one number
+        // that answers "does it make the sample interval". Measuring
+        // flush-to-zero only against the flash-resident build, as this
+        // benchmark used to, answers a question nobody has.
+        set_flush_to_zero(true);
+        let total = cycles(|| {
+            for _ in 0..N_REPS {
+                for z in measurements.iter() {
+                    ram_filter_step(&mut ekf, &model, core::hint::black_box(z));
+                }
+            }
+        });
+        report("full IEKF step, CODE IN RAM, flush-to-zero", total, calls);
+        set_flush_to_zero(false);
     }
 
     // The linear algebra on its own, since the step above is far more than the
@@ -476,14 +492,14 @@ async fn main(_spawner: Spawner) {
         let total = cycles(|| {
             for _ in 0..N_REPS {
                 for _ in 0..N_POSES {
-                    core::hint::black_box(linalg::cholesky_solve_mat::<MEAS_DIM, POSE_DIM>(
+                    core::hint::black_box(linalg::cholesky_solve_mat_transposed::<MEAS_DIM, POSE_DIM>(
                         core::hint::black_box(&chol),
                         &jp,
                     ));
                 }
             }
         });
-        report("  solve          (9x9 \\ 9x6)", total, calls);
+        report("  solve+transpose(9x9 \\ 9x6)", total, calls);
     }
 
     // A correctness check, so a benchmark that optimised the work away or read

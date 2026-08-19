@@ -145,20 +145,41 @@ impl FieldTable {
         let mut d_z_du = 0.0f32;
         let mut d_z_dv = 0.0f32;
 
+        // Separable, which a bicubic is and the obvious loop is not. Summing
+        // over `z` first gives, per row, one value and one derivative for each
+        // component; the `rho` weights then combine those four rows. Sixteen
+        // points cost four multiply-accumulates each instead of nine, because
+        // the products `wu[i]*wv[j]`, `du[i]*wv[j]` and `wu[i]*dv[j]` are
+        // formed once per row rather than once per point: 88 operations
+        // against 144, for the same numbers.
+        //
+        // The `try_into` is not decoration. `b_rho` and `b_z` are slices, so
+        // indexing them per point emitted two bounds checks per point -- 32
+        // compare-and-branch pairs per call, in the innermost loop of the
+        // hottest function in the firmware. `stencil` has already clamped the
+        // stencil inside the array; lifting a fixed `[f32; 4]` out per row
+        // states that in a way the compiler can act on, and leaves eight
+        // checks where there were thirty-two.
         for i in 0..4 {
-            let row = (i0 + i) * consts::N_Z;
+            let idx = (i0 + i) * consts::N_Z + j0;
+            let row_rho: &[f32; 4] = self.b_rho[idx..idx + 4].try_into().unwrap();
+            let row_z: &[f32; 4] = self.b_z[idx..idx + 4].try_into().unwrap();
+
+            let (mut v_rho, mut g_rho) = (0.0f32, 0.0f32);
+            let (mut v_z, mut g_z) = (0.0f32, 0.0f32);
             for j in 0..4 {
-                let idx = row + j0 + j;
-                let f_rho = self.b_rho[idx];
-                let f_z = self.b_z[idx];
-                let w = wu[i] * wv[j];
-                out.b_rho += w * f_rho;
-                out.b_z += w * f_z;
-                d_rho_du += du[i] * wv[j] * f_rho;
-                d_rho_dv += wu[i] * dv[j] * f_rho;
-                d_z_du += du[i] * wv[j] * f_z;
-                d_z_dv += wu[i] * dv[j] * f_z;
+                v_rho += wv[j] * row_rho[j];
+                g_rho += dv[j] * row_rho[j];
+                v_z += wv[j] * row_z[j];
+                g_z += dv[j] * row_z[j];
             }
+
+            out.b_rho += wu[i] * v_rho;
+            out.b_z += wu[i] * v_z;
+            d_rho_du += du[i] * v_rho;
+            d_rho_dv += wu[i] * g_rho;
+            d_z_du += du[i] * v_z;
+            d_z_dv += wu[i] * g_z;
         }
 
         out.d_rho_d_rho = live_u * d_rho_du / consts::D_RHO;
