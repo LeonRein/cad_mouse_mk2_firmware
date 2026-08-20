@@ -128,7 +128,7 @@ pub const REPORT_DESCRIPTOR: &[u8] = &[
 ///
 /// Eight by default: a device that needs the host reconfigured before it feels
 /// right is a device that feels broken on the first machine it meets.
-pub const REPORT_INTERVAL_MS: u64 = 8;
+pub const REPORT_INTERVAL_MS: u64 = 1;
 
 /// How often the report is rebuilt and compared against the last one sent.
 const TICK: Duration = Duration::from_millis(REPORT_INTERVAL_MS);
